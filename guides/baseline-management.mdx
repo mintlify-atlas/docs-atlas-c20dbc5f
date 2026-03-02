@@ -1,0 +1,406 @@
+---
+title: Baseline Management
+description: Learn how to create and use baselines to suppress known findings and track only new security issues
+---
+
+Baselines allow you to acknowledge existing security findings while ensuring new issues are caught and addressed. This is essential when introducing Ward into an existing project or managing technical debt.
+
+## What is a Baseline?
+
+A baseline is a snapshot of current security findings in your project. When you scan with a baseline file, Ward:
+
+1. **Suppresses** findings that are already in the baseline
+2. **Reports** only new findings that aren't in the baseline
+3. **Optionally fails** CI builds based on new findings only
+
+Each baseline entry contains a **fingerprint**—a stable hash of the finding's rule ID, file path, and line number. This means:
+
+- Findings persist even if descriptions or remediation text changes
+- Moving code to a different line creates a new finding
+- Renaming files creates a new finding
+
+## Creating a Baseline
+
+### Initial Baseline Creation
+
+When first introducing Ward to a project, generate a baseline of current findings:
+
+```bash
+ward scan . --output json --update-baseline .ward-baseline.json
+```
+
+This creates `.ward-baseline.json` containing all findings from the scan:
+
+```json
+{
+  "version": "1.0",
+  "created_at": "2026-03-02T10:15:30Z",
+  "updated_at": "2026-03-02T10:15:30Z",
+  "entries": [
+    {
+      "fingerprint": "a3f7b2e1c4d5e6f7a8b9c0d1",
+      "id": "ENV-002",
+      "file": ".env",
+      "line": 3,
+      "title": "APP_DEBUG=true in production",
+      "severity": "High"
+    },
+    {
+      "fingerprint": "d1e2f3a4b5c6d7e8f9a0b1c2",
+      "id": "SECRET-001",
+      "file": "app/Http/Controllers/PaymentController.php",
+      "line": 45,
+      "title": "Hardcoded password in PHP source",
+      "severity": "High"
+    }
+  ]
+}
+```
+
+<Note>
+Commit `.ward-baseline.json` to your repository to share the baseline across your team and CI pipeline.
+</Note>
+
+## Using a Baseline
+
+### Suppress Known Findings
+
+Run Ward with the `--baseline` flag to suppress findings already in the baseline:
+
+```bash
+ward scan . --output json --baseline .ward-baseline.json
+```
+
+Output shows only **new** findings (those not in the baseline):
+
+```
+  ● Scanners
+    ✓ env-scanner — 0 findings
+    ✓ config-scanner — 0 findings
+    ✓ dependency-scanner — 1 findings
+    ✓ rules-scanner — 3 findings
+
+  Done. 4 findings in 2.3s
+    High       2
+    Medium     1
+    Low        1
+
+  [info] 12 findings suppressed by baseline
+```
+
+### Combining with Fail Thresholds
+
+Use baselines with `--fail-on` in CI to fail builds only when **new** High or Critical findings are detected:
+
+```bash
+ward scan . --output json --baseline .ward-baseline.json --fail-on high
+```
+
+This command:
+- Loads the baseline from `.ward-baseline.json`
+- Suppresses all findings already in the baseline
+- Exits with code 1 if any **new** High or Critical findings are discovered
+- Exits with code 0 if all findings are baselined or below High severity
+
+## Updating a Baseline
+
+### When to Update
+
+Update your baseline when:
+
+- You've **fixed** findings and want to remove them from the baseline
+- You've **acknowledged** new findings as acceptable technical debt
+- You've **refactored** code and line numbers have changed
+
+### Update Workflow
+
+<Steps>
+
+<Step title="Run a scan and update the baseline">
+```bash
+ward scan . --output json --update-baseline .ward-baseline.json
+```
+
+This **replaces** the entire baseline with current findings.
+</Step>
+
+<Step title="Review the changes">
+Check what changed in the baseline:
+
+```bash
+git diff .ward-baseline.json
+```
+
+Ensure the changes reflect your intent (e.g., removed entries for fixed findings, new entries for acknowledged issues).
+</Step>
+
+<Step title="Commit the updated baseline">
+```bash
+git add .ward-baseline.json
+git commit -m "Update Ward baseline: fixed ENV-002, acknowledged SECRET-003"
+git push
+```
+</Step>
+
+</Steps>
+
+<Warning>
+`--update-baseline` **overwrites** the entire baseline file. If you run it accidentally with a partial scan (e.g., only certain scanners enabled), you'll lose baseline entries for other findings.
+</Warning>
+
+## Baseline Workflow Examples
+
+### Legacy Project Introduction
+
+When introducing Ward to a project with many existing findings:
+
+<Steps>
+
+<Step title="Run initial scan">
+See all findings in the project:
+
+```bash
+ward scan .
+```
+
+Review findings in the TUI or reports.
+</Step>
+
+<Step title="Create baseline">
+Acknowledge all current findings:
+
+```bash
+ward scan . --output json --update-baseline .ward-baseline.json
+```
+</Step>
+
+<Step title="Commit baseline">
+```bash
+git add .ward-baseline.json
+git commit -m "Add Ward baseline for legacy findings"
+```
+</Step>
+
+<Step title="Configure CI">
+Set up CI to fail on new findings only:
+
+```yaml
+- name: Run Ward
+  run: |
+    ward scan . --output json \
+      --baseline .ward-baseline.json \
+      --fail-on high
+```
+</Step>
+
+<Step title="Incrementally fix">
+As you fix findings, update the baseline to reflect progress:
+
+```bash
+# After fixing ENV-002
+ward scan . --output json --update-baseline .ward-baseline.json
+git add .ward-baseline.json
+git commit -m "Fixed APP_DEBUG issue, updated baseline"
+```
+</Step>
+
+</Steps>
+
+### Gradual Remediation
+
+Use baselines to track remediation progress over time:
+
+```bash
+# Week 1: Initial baseline with 50 findings
+ward scan . --update-baseline .ward-baseline.json
+git add .ward-baseline.json
+git commit -m "Week 1 baseline: 50 findings"
+
+# Week 2: Fixed 10 findings, update baseline
+ward scan . --update-baseline .ward-baseline.json
+git add .ward-baseline.json
+git commit -m "Week 2: 40 findings remaining (fixed 10)"
+
+# Week 3: Fixed 15 more findings
+ward scan . --update-baseline .ward-baseline.json
+git add .ward-baseline.json
+git commit -m "Week 3: 25 findings remaining (fixed 15)"
+```
+
+Track your progress with `git log .ward-baseline.json` or by comparing baseline file sizes.
+
+## Baseline Implementation Details
+
+### Fingerprint Generation
+
+Ward generates fingerprints using a SHA-256 hash of the finding's:
+- **Rule ID** (e.g., `ENV-002`)
+- **File path** (e.g., `app/Http/Controllers/UserController.php`)
+- **Line number** (e.g., `42`)
+
+From `internal/models/finding.go`:
+
+```go
+func (f Finding) Fingerprint() string {
+    h := sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%d", f.ID, f.File, f.Line)))
+    return fmt.Sprintf("%x", h[:12]) // 24-char hex
+}
+```
+
+This ensures:
+- Findings remain consistent across scans even if descriptions change
+- Refactoring code (changing line numbers) creates new findings
+- Renaming files creates new findings
+
+### Baseline Filtering
+
+When a baseline is loaded, Ward filters findings before reporting. From `internal/baseline/baseline.go`:
+
+```go
+func (b *Baseline) Filter(findings []models.Finding) (filtered []models.Finding, suppressed int) {
+    if b == nil {
+        return findings, 0
+    }
+
+    filtered = make([]models.Finding, 0, len(findings))
+    for _, f := range findings {
+        if b.IsBaselined(f) {
+            suppressed++
+        } else {
+            filtered = append(filtered, f)
+        }
+    }
+    return filtered, suppressed
+}
+```
+
+Only findings **not** in the baseline are included in reports and exit code checks.
+
+## Best Practices
+
+### 1. Commit Baselines to Version Control
+
+Always commit `.ward-baseline.json` to your repository:
+
+```bash
+git add .ward-baseline.json
+git commit -m "Add Ward security baseline"
+```
+
+This ensures:
+- Team members see the same baseline
+- CI pipelines use the correct baseline
+- Baseline changes are reviewed via pull requests
+
+### 2. Review Baseline Changes
+
+Before committing baseline updates, review the diff:
+
+```bash
+git diff .ward-baseline.json
+```
+
+Ensure:
+- Removed entries correspond to fixed findings
+- New entries are intentional acknowledgments, not overlooked issues
+
+### 3. Use Descriptive Commit Messages
+
+Document **why** the baseline changed:
+
+```bash
+git commit -m "Update baseline: fixed ENV-002 (APP_DEBUG), acknowledged SECRET-007 as safe"
+```
+
+This provides context for future team members.
+
+### 4. Don't Baseline Critical Findings
+
+Avoid baselineing Critical findings unless absolutely necessary. Critical findings represent immediate security risks (e.g., empty `APP_KEY`, `eval()` usage) and should be fixed, not suppressed.
+
+### 5. Periodically Review Baselines
+
+Schedule regular reviews of your baseline:
+
+```bash
+# See all baselined findings
+cat .ward-baseline.json | jq '.entries[] | "\(.severity) - \(.title) - \(.file):\(.line)"'
+```
+
+Re-evaluate whether baselined findings can now be fixed.
+
+## Baseline File Format
+
+The baseline file is JSON with the following structure:
+
+```json
+{
+  "version": "1.0",
+  "created_at": "2026-03-02T10:15:30Z",
+  "updated_at": "2026-03-02T12:45:00Z",
+  "entries": [
+    {
+      "fingerprint": "a3f7b2e1c4d5e6f7a8b9c0d1",
+      "id": "ENV-002",
+      "file": ".env",
+      "line": 3,
+      "title": "APP_DEBUG=true in production",
+      "severity": "High"
+    }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `version` | Baseline format version (currently `1.0`) |
+| `created_at` | Timestamp when baseline was first created |
+| `updated_at` | Timestamp of last baseline update |
+| `entries` | Array of baselined findings |
+| `entries[].fingerprint` | Stable SHA-256 hash of rule ID + file + line |
+| `entries[].id` | Rule ID (e.g., `ENV-002`) |
+| `entries[].file` | Relative path to the file containing the finding |
+| `entries[].line` | Line number where the finding was detected |
+| `entries[].title` | Finding title (for human readability) |
+| `entries[].severity` | Severity level (Info, Low, Medium, High, Critical) |
+
+## Troubleshooting
+
+### Baseline not suppressing findings
+
+**Symptom:** Findings appear in scan results despite being in the baseline.
+
+**Causes:**
+- Line numbers changed due to code edits (fingerprint changed)
+- File was moved or renamed (fingerprint changed)
+- Rule ID changed in a Ward update
+
+**Solution:** Update the baseline to reflect current code state:
+
+```bash
+ward scan . --output json --update-baseline .ward-baseline.json
+```
+
+### Baseline file not found in CI
+
+**Symptom:** CI fails with "loading baseline: no such file or directory".
+
+**Solution:** Ensure `.ward-baseline.json` is committed and pushed:
+
+```bash
+git add .ward-baseline.json
+git commit -m "Add baseline"
+git push
+```
+
+### Accidentally overwrote baseline
+
+**Symptom:** Baseline file is missing expected entries after running `--update-baseline`.
+
+**Solution:** Restore from git history:
+
+```bash
+git checkout HEAD~1 -- .ward-baseline.json
+git add .ward-baseline.json
+git commit -m "Restore baseline"
+```

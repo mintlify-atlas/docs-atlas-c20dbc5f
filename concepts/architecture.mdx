@@ -1,0 +1,443 @@
+---
+title: System Architecture
+description: Ward's interface-first, event-driven architecture with shared context and rules as data
+---
+
+## Design Principles
+
+Ward is built on four core architectural principles:
+
+<CardGroup cols={2}>
+  <Card title="Interface-First" icon="shapes">
+    Every component (Scanner, Provider, Reporter, Resolver) is a Go interface, enabling easy extension and testing
+  </Card>
+  <Card title="Event-Driven" icon="bolt">
+    Scanners emit findings through an event bus; the TUI subscribes to real-time updates
+  </Card>
+  <Card title="Shared Context" icon="share-nodes">
+    Resolvers build a ProjectContext once; all scanners consume it independently
+  </Card>
+  <Card title="Rules as Data" icon="file-code">
+    YAML-based security rules — no recompilation needed to add or modify checks
+  </Card>
+</CardGroup>
+
+## Component Overview
+
+Ward's architecture is organized into distinct, loosely-coupled components:
+
+```
+CLI (cobra)  →  Orchestrator  →  Provider → Resolvers → Scanners → Post-Process → Report
+                     │                                      │
+                 EventBus  ←──────────────────────────────────
+                     │
+                TUI (Bubble Tea)
+```
+
+## Core Components
+
+### Orchestrator
+
+**Location:** `internal/orchestrator/orchestrator.go`
+
+The Orchestrator is the pipeline coordinator that executes the 5-stage scan workflow. It:
+
+- Manages the scan lifecycle from start to completion
+- Publishes events to the EventBus at each pipeline stage
+- Coordinates all scanners and handles their results
+- Applies post-processing (deduplication, filtering, baseline comparison)
+- Triggers report generation in multiple formats
+
+<CodeGroup>
+```go orchestrator.go:49-78
+func (o *Orchestrator) Run(ctx context.Context) error {
+    startTime := time.Now()
+
+    scanners := []models.Scanner{
+        envscanner.New(),
+        configscanner.New(),
+        depscanner.New(),
+    }
+
+    // Load custom YAML rules and add rules scanner
+    customRules, err := config.LoadAllRules(o.cfg)
+    if err != nil {
+        o.bus.Publish(eventbus.NewEvent(eventbus.EventLogMessage, ...))
+    } else if len(customRules) > 0 {
+        scanners = append(scanners, rulesscanner.New(customRules))
+    }
+
+    // Filter scanners based on config enable/disable lists
+    scanners = o.filterScanners(scanners)
+
+    o.bus.Publish(eventbus.NewEvent(eventbus.EventScanStarted, ...))
+
+    // Execute 5-stage pipeline: Provider → Resolvers → Scanners → Post-Process → Report
+    // ...
+}
+```
+</CodeGroup>
+
+### Event Bus
+
+**Location:** `internal/eventbus/`
+
+The EventBus provides a decoupled publish-subscribe mechanism for real-time communication between components.
+
+**Key Features:**
+- Type-safe event system with 12+ event types
+- Synchronous event delivery
+- Support for both typed and wildcard subscriptions
+- Thread-safe using `sync.RWMutex`
+
+**Event Types:**
+
+<AccordionGroup>
+  <Accordion title="Scan Lifecycle Events">
+    - `EventScanStarted` — Scan begins
+    - `EventScanCompleted` — Scan finishes successfully
+    - `EventScanFailed` — Scan encounters an error
+  </Accordion>
+  <Accordion title="Pipeline Stage Events">
+    - `EventStageStarted` — A pipeline stage begins (Provider, Resolvers, etc.)
+    - `EventStageCompleted` — A pipeline stage completes
+  </Accordion>
+  <Accordion title="Scanner Events">
+    - `EventScannerRegistered` — Scanner is registered
+    - `EventScannerStarted` — Scanner begins execution
+    - `EventScannerCompleted` — Scanner finishes
+    - `EventScannerFailed` — Scanner encounters an error
+    - `EventScannerSkipped` — Scanner is disabled/skipped
+  </Accordion>
+  <Accordion title="Finding Events">
+    - `EventFindingDiscovered` — A new security finding is detected
+  </Accordion>
+  <Accordion title="Context Events">
+    - `EventContextResolved` — Project metadata has been resolved
+  </Accordion>
+</AccordionGroup>
+
+<CodeGroup>
+```go eventbus/bus.go:37-52
+// Publish sends an event to all matching subscribers synchronously.
+func (b *EventBus) Publish(event Event) {
+    b.mu.RLock()
+    defer b.mu.RUnlock()
+
+    if b.closed {
+        return
+    }
+
+    // Send to wildcard handlers
+    for _, h := range b.allHandlers {
+        h(event)
+    }
+    // Send to type-specific handlers
+    for _, h := range b.subscribers[event.Type] {
+        h(event)
+    }
+}
+```
+</CodeGroup>
+
+### Interfaces
+
+Ward defines clean interfaces for all major components:
+
+<Tabs>
+  <Tab title="Scanner">
+    **Location:** `internal/models/scanner.go`
+
+    All security scanners implement this interface:
+
+    ```go
+    type Scanner interface {
+        Name() string
+        Description() string
+        Scan(ctx context.Context, project ProjectContext, emit func(Finding)) ([]Finding, error)
+    }
+    ```
+
+    The `emit` callback allows scanners to stream findings in real-time to the TUI.
+  </Tab>
+  <Tab title="Provider">
+    **Location:** `internal/provider/provider.go`
+
+    Source providers abstract where project code comes from:
+
+    ```go
+    type SourceProvider interface {
+        Acquire(ctx context.Context, path string) (*SourceResult, error)
+        Cleanup() error
+    }
+    ```
+
+    **Implementations:**
+    - `LocalProvider` — Filesystem access
+    - `GitProvider` — Shallow clone from Git URLs
+  </Tab>
+  <Tab title="Resolver">
+    **Location:** `internal/resolver/resolver.go`
+
+    Resolvers build sections of the ProjectContext:
+
+    ```go
+    type ContextResolver interface {
+        Name() string
+        Resolve(ctx context.Context, root string, pc *ProjectContext) error
+        Priority() int // lower runs first
+    }
+    ```
+
+    **Implementations:**
+    - `FrameworkResolver` — Reads `composer.json` and `.env`
+    - `PackageResolver` — Reads `composer.lock` for installed packages
+  </Tab>
+  <Tab title="Reporter">
+    **Location:** `internal/reporter/reporter.go`
+
+    Reporters generate output from scan results:
+
+    ```go
+    type Reporter interface {
+        Name() string
+        Format() string // file extension
+        Generate(ctx context.Context, report *models.ScanReport) error
+    }
+    ```
+
+    **Implementations:**
+    - `JSONReporter` — Machine-readable format
+    - `SARIFReporter` — GitHub Code Scanning integration
+    - `HTMLReporter` — Standalone visual report
+    - `MarkdownReporter` — Text-based for PRs
+  </Tab>
+</Tabs>
+
+## Shared Context
+
+The `ProjectContext` structure holds all resolved project metadata that scanners consume:
+
+**Location:** `internal/models/context.go`
+
+```go
+type ProjectContext struct {
+    RootPath          string
+    LaravelVersion    string
+    PHPVersion        string
+    ProjectName       string
+    FrameworkType     string
+    ComposerDeps      map[string]string // from composer.json require
+    InstalledPackages map[string]string // from composer.lock (resolved versions)
+    EnvVariables      map[string]string
+    ConfigFiles       []string
+}
+```
+
+This context is built **once** by resolvers and shared **immutably** across all scanners, ensuring:
+- Performance: No redundant parsing
+- Consistency: All scanners see the same project state
+- Independence: Scanners don't need to know how to parse Laravel files
+
+## Directory Structure
+
+```
+ward/
+├── main.go
+├── cmd/                           # CLI commands
+│   ├── root.go
+│   ├── init.go
+│   ├── scan.go
+│   └── version.go
+└── internal/
+    ├── config/                    # Configuration system
+    │   ├── config.go              # WardConfig, Load(), Save()
+    │   ├── dirs.go                # ~/.ward/ directory management
+    │   ├── rules.go               # YAML rule loading + overrides
+    │   ├── init.go                # Scaffold with embedded defaults
+    │   └── defaults/rules/        # 8 embedded YAML rule files
+    ├── models/                    # Shared types
+    │   ├── severity.go
+    │   ├── finding.go
+    │   ├── context.go
+    │   ├── report.go
+    │   ├── scanner.go
+    │   └── pipeline.go
+    ├── eventbus/                  # Event system
+    │   ├── events.go              # Event types & payloads
+    │   ├── bus.go                 # Pub/sub implementation
+    │   └── bridge.go              # TUI integration
+    ├── provider/                  # Source providers
+    │   ├── provider.go            # Interface
+    │   ├── local.go               # Local filesystem
+    │   └── git.go                 # Git clone
+    ├── resolver/                  # Context resolvers
+    │   ├── resolver.go            # Interface
+    │   ├── framework.go           # composer.json + .env
+    │   └── package.go             # composer.lock
+    ├── scanner/                   # Security scanners
+    │   ├── env/scanner.go         # .env checks (8 rules)
+    │   ├── configscan/scanner.go  # config/*.php checks (13 rules)
+    │   ├── dependency/scanner.go  # CVE advisory checks (OSV.dev)
+    │   └── rules/scanner.go       # YAML rule engine (40 default rules)
+    ├── reporter/                  # Report generators
+    │   ├── reporter.go            # Interface
+    │   ├── json.go
+    │   ├── sarif.go
+    │   ├── html.go
+    │   └── markdown.go
+    ├── orchestrator/              # Pipeline coordinator
+    │   └── orchestrator.go
+    ├── store/                     # Scan history
+    │   └── store.go
+    ├── baseline/                  # Baseline filtering
+    │   └── baseline.go
+    └── tui/                       # Terminal UI
+        ├── app.go
+        ├── banner/
+        ├── theme/
+        ├── components/
+        └── views/
+```
+
+## Data Flow
+
+Here's how data flows through Ward during a scan:
+
+<Steps>
+  <Step title="CLI Invocation">
+    User runs `ward scan ./my-app`
+    
+    The `scan.go` command:
+    - Creates an EventBus
+    - Loads configuration from `~/.ward/config.yaml`
+    - Creates an Orchestrator
+    - Launches the TUI (if TTY available) or headless mode
+  </Step>
+  <Step title="Provider Stage">
+    The Orchestrator uses a SourceProvider to acquire the project:
+    - `LocalProvider` validates the path exists
+    - `GitProvider` performs a shallow clone
+    - Returns a `SourceResult` with root path and Laravel detection
+  </Step>
+  <Step title="Resolvers Stage">
+    Resolvers run in priority order to build the ProjectContext:
+    1. `FrameworkResolver` parses `composer.json` and `.env`
+    2. `PackageResolver` reads `composer.lock` for installed packages
+    
+    The resolved context is published via `EventContextResolved`
+  </Step>
+  <Step title="Scanners Stage">
+    All scanners run independently with the shared ProjectContext:
+    - `env-scanner` checks `.env` files
+    - `config-scanner` analyzes `config/*.php`
+    - `dependency-scanner` queries OSV.dev for CVEs
+    - `rules-scanner` executes YAML pattern rules
+    
+    Each finding is emitted via callback **and** published as `EventFindingDiscovered`
+  </Step>
+  <Step title="Post-Process Stage">
+    The Orchestrator processes all findings:
+    1. **Deduplication** — Removes duplicate findings (same ID + file + line)
+    2. **Severity filtering** — Applies minimum severity from config
+    3. **Baseline comparison** — Suppresses known findings if baseline is provided
+    4. **History diff** — Compares with last scan to show new/resolved findings
+  </Step>
+  <Step title="Report Stage">
+    Reporters generate output files:
+    - JSON (always generated)
+    - SARIF (if configured)
+    - HTML (if configured)
+    - Markdown (if configured)
+    
+    The final `ScanReport` is published via `EventScanCompleted`
+  </Step>
+</Steps>
+
+## Terminal UI Integration
+
+The TUI is built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and subscribes to the EventBus:
+
+```go
+// TUI subscribes to all events
+bus.SubscribeAll(func(event Event) {
+    // Update TUI state based on event type
+    switch event.Type {
+    case EventStageStarted:
+        // Show stage progress
+    case EventScannerStarted:
+        // Show scanner spinner
+    case EventFindingDiscovered:
+        // Increment severity counters
+    case EventScanCompleted:
+        // Switch to results view
+    }
+})
+```
+
+This event-driven design keeps the TUI and scan logic completely decoupled.
+
+## Extending Ward
+
+<AccordionGroup>
+  <Accordion title="Adding a New Scanner">
+    1. Create a new package under `internal/scanner/`
+    2. Implement the `Scanner` interface
+    3. Register it in `orchestrator.go:52-56`
+
+    ```go
+    type MyScanner struct{}
+
+    func (s *MyScanner) Name() string { return "my-scanner" }
+    func (s *MyScanner) Description() string { return "My custom checks" }
+    func (s *MyScanner) Scan(ctx context.Context, pc models.ProjectContext, emit func(models.Finding)) ([]models.Finding, error) {
+        var findings []models.Finding
+        // Your scan logic here
+        return findings, nil
+    }
+    ```
+  </Accordion>
+  <Accordion title="Adding a New Resolver">
+    1. Create a new file in `internal/resolver/`
+    2. Implement the `ContextResolver` interface
+    3. Register it in `orchestrator.go:111-114`
+
+    ```go
+    type MyResolver struct{}
+
+    func (r *MyResolver) Name() string { return "my-resolver" }
+    func (r *MyResolver) Priority() int { return 100 }
+    func (r *MyResolver) Resolve(ctx context.Context, root string, pc *models.ProjectContext) error {
+        // Populate fields in pc
+        return nil
+    }
+    ```
+  </Accordion>
+  <Accordion title="Adding a New Reporter">
+    1. Create a new file in `internal/reporter/`
+    2. Implement the `Reporter` interface
+    3. Add a case in `orchestrator.go:326-338`
+
+    ```go
+    type MyReporter struct{}
+
+    func (r *MyReporter) Name() string { return "my-reporter" }
+    func (r *MyReporter) Format() string { return "myformat" }
+    func (r *MyReporter) Generate(ctx context.Context, report *models.ScanReport) error {
+        // Generate your output format
+        return nil
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Related Pages
+
+<CardGroup cols={2}>
+  <Card title="Scan Pipeline" icon="diagram-project" href="/concepts/scan-pipeline">
+    Deep dive into the 5-stage scan pipeline
+  </Card>
+  <Card title="Security Scanners" icon="shield-halved" href="/concepts/security-scanners">
+    Overview of all built-in scanners
+  </Card>
+</CardGroup>

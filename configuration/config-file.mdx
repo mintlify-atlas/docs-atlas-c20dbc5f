@@ -1,0 +1,305 @@
+---
+title: Configuration File
+description: Complete reference for Ward's config.yaml structure and options
+---
+
+Ward's main configuration file is located at `~/.ward/config.yaml`. It controls severity filtering, output formats, scanner behavior, rule overrides, AI settings, and source provider options.
+
+## Configuration Structure
+
+The configuration file is generated when you run `ward init` and contains the following sections:
+
+```yaml
+# Minimum severity to report: info, low, medium, high, critical
+severity: info
+
+output:
+  formats: [json, sarif, html, markdown]
+  dir: ./reports
+
+scanners:
+  disable: []     # scanner names to skip, e.g. ["dependency-scanner"]
+
+rules:
+  disable: []     # rule IDs to silence, e.g. ["DEBUG-001", "AUTH-001"]
+  override:       # change severity for specific rules
+    DEBUG-002:
+      severity: low
+  # custom_dirs:  # load rules from additional directories
+  #   - /path/to/team-rules
+
+providers:
+  git_depth: 1    # shallow clone depth (0 = full history)
+
+ai:
+  enabled: false
+  provider: openai
+  model: gpt-4o
+  # api_key: ""   # or set WARD_AI_API_KEY environment variable
+  # endpoint: ""  # custom endpoint for self-hosted models
+```
+
+## Configuration Options
+
+### Top-Level Options
+
+<ParamField path="severity" type="string" default="info">
+  Minimum severity level to report. Findings below this threshold are filtered out.
+  
+  **Valid values:** `info`, `low`, `medium`, `high`, `critical`
+  
+  Example: Setting `severity: medium` will only report Medium, High, and Critical findings.
+</ParamField>
+
+### Output Configuration
+
+Controls report generation formats and output directory.
+
+<ParamField path="output.formats" type="array" default="[json, sarif, html, markdown]">
+  List of report formats to generate. Ward will create a separate file for each format.
+  
+  **Valid formats:**
+  - `json` — Machine-readable JSON (always generated as baseline)
+  - `sarif` — SARIF 2.1.0 format for GitHub Code Scanning and IDEs
+  - `html` — Standalone visual report with dark theme
+  - `markdown` — Text-based report, great for pull requests
+  
+  Example:
+  ```yaml
+  output:
+    formats: [json, sarif]
+  ```
+</ParamField>
+
+<ParamField path="output.dir" type="string" default=".">
+  Output directory for generated report files. Relative to the scanned project root.
+  
+  Example:
+  ```yaml
+  output:
+    dir: ./reports
+  ```
+  
+  This will write files like `./reports/ward-report.json`, `./reports/ward-report.sarif`, etc.
+</ParamField>
+
+### Scanners Configuration
+
+Controls which security scanners are enabled.
+
+<ParamField path="scanners.enable" type="array" default="[]">
+  Explicit list of scanners to enable. If empty, all scanners run by default.
+  
+  **Available scanners:**
+  - `env-scanner` — `.env` misconfigurations
+  - `config-scanner` — `config/*.php` security issues
+  - `dependency-scanner` — CVE lookup via OSV.dev
+  - `rules-scanner` — YAML-based pattern rules
+  
+  Example:
+  ```yaml
+  scanners:
+    enable: ["env-scanner", "config-scanner"]
+  ```
+</ParamField>
+
+<ParamField path="scanners.disable" type="array" default="[]">
+  List of scanner names to skip. Useful for disabling specific scanners without changing the enable list.
+  
+  Example:
+  ```yaml
+  scanners:
+    disable: ["dependency-scanner"]
+  ```
+</ParamField>
+
+### Rules Configuration
+
+Controls rule loading, overrides, and custom rule directories.
+
+<ParamField path="rules.disable" type="array" default="[]">
+  List of rule IDs to completely disable. These rules will not run during scans.
+  
+  Example:
+  ```yaml
+  rules:
+    disable: ["DEBUG-001", "DEBUG-002", "AUTH-001"]
+  ```
+</ParamField>
+
+<ParamField path="rules.override" type="object" default="{}">
+  Map of rule IDs to override settings. Allows changing severity or disabling specific rules without editing rule files.
+  
+  **Override options:**
+  - `severity` — Change the rule's severity level
+  - `enabled` — Disable the rule (alternative to `disable` list)
+  
+  Example:
+  ```yaml
+  rules:
+    override:
+      DEBUG-002:
+        severity: low
+      CRYPTO-003:
+        severity: info
+      AUTH-001:
+        enabled: false
+  ```
+</ParamField>
+
+<ParamField path="rules.custom_dirs" type="array" default="[]">
+  Additional directories to load rules from. Ward always loads rules from `~/.ward/rules/`, and this option lets you add team-wide or project-specific rule directories.
+  
+  Example:
+  ```yaml
+  rules:
+    custom_dirs:
+      - /path/to/team-rules
+      - ./project-rules
+  ```
+</ParamField>
+
+### Providers Configuration
+
+Controls source provider behavior (local filesystem and git).
+
+<ParamField path="providers.git_depth" type="integer" default="1">
+  Shallow clone depth for git repositories. Set to `1` for fastest clones (only latest commit), or `0` for full history.
+  
+  Example:
+  ```yaml
+  providers:
+    git_depth: 1  # shallow clone (fastest)
+  ```
+  
+  ```yaml
+  providers:
+    git_depth: 0  # full clone (slower, includes all history)
+  ```
+</ParamField>
+
+### AI Configuration
+
+Controls AI-assisted scanning features (experimental).
+
+<ParamField path="ai.enabled" type="boolean" default="false">
+  Enable or disable AI-assisted scanning.
+  
+  Example:
+  ```yaml
+  ai:
+    enabled: true
+  ```
+</ParamField>
+
+<ParamField path="ai.provider" type="string" default="openai">
+  AI provider to use for assisted scanning.
+  
+  **Valid providers:** `openai`, `anthropic`, `ollama`
+  
+  Example:
+  ```yaml
+  ai:
+    provider: anthropic
+  ```
+</ParamField>
+
+<ParamField path="ai.model" type="string" default="gpt-4o">
+  Model name to use for the selected provider.
+  
+  Example:
+  ```yaml
+  ai:
+    model: gpt-4o
+  ```
+</ParamField>
+
+<ParamField path="ai.api_key" type="string" default="">
+  API key for the AI provider. Can also be set via the `WARD_AI_API_KEY` environment variable.
+  
+  Example:
+  ```yaml
+  ai:
+    api_key: "sk-..."
+  ```
+</ParamField>
+
+<ParamField path="ai.endpoint" type="string" default="">
+  Custom endpoint URL for self-hosted models or alternative API endpoints.
+  
+  Example:
+  ```yaml
+  ai:
+    endpoint: "https://api.custom-endpoint.com/v1"
+  ```
+</ParamField>
+
+## Default Configuration
+
+When you run `ward init`, the following default configuration is created:
+
+```yaml config.yaml
+# Ward configuration
+# https://github.com/eljakani/ward
+
+severity: info
+
+output:
+  formats:
+    - json
+    - sarif
+    - html
+    - markdown
+  dir: .
+
+scanners:
+  enable: []
+  disable: []
+
+rules:
+  disable: []
+  override: {}
+  custom_dirs: []
+
+ai:
+  enabled: false
+  provider: openai
+  model: gpt-4o
+  api_key: ""
+  endpoint: ""
+
+providers:
+  git_depth: 1
+```
+
+## Configuration Loading
+
+Ward loads configuration in the following order:
+
+1. **Default values** — Built-in defaults from the source code (internal/config/config.go:59-78)
+2. **Config file** — `~/.ward/config.yaml` if it exists
+3. **Environment variables** — `WARD_AI_API_KEY` overrides `ai.api_key`
+4. **CLI flags** — Command-line flags override config file settings
+
+## CLI Overrides
+
+Some configuration options can be overridden via command-line flags:
+
+```bash
+# Override output formats
+ward scan . --output json,sarif
+
+# Override minimum severity
+ward scan . --severity high
+
+# Override output directory
+ward scan . --output-dir ./security-reports
+```
+
+See the [CLI Reference](/cli-reference) for all available flags.
+
+## Related Pages
+
+- [Custom Rules](/configuration/custom-rules) — Writing your own security rules
+- [Output Formats](/configuration/output-formats) — Detailed format documentation
+- [Rule Overrides](/configuration/rule-overrides) — Disabling and customizing rules

@@ -1,0 +1,268 @@
+---
+title: Dependency scanner
+description: Live CVE lookup via OSV.dev for Packagist packages
+---
+
+The dependency scanner checks your `composer.lock` file against the [OSV.dev](https://osv.dev) vulnerability database in real time. Unlike scanners with hardcoded advisory lists, Ward queries the live database covering the entire PHP/Composer ecosystem.
+
+## How it works
+
+The dependency scanner performs a **2-phase lookup** to minimize network requests:
+
+<Steps>
+  <Step title="Batch query for affected packages">
+    Ward sends all packages from `composer.lock` to the OSV.dev batch API endpoint to identify which packages have known vulnerabilities.
+    
+    ```go
+    // scanner.go:76-153
+    func (s *Scanner) batchQuery(ctx context.Context, packages map[string]string) ([]vulnPackage, error) {
+        // Build list of packages
+        for name, version := range packages {
+            q := query{Version: normalizeVersion(version)}
+            q.Package.Name = name
+            q.Package.Ecosystem = "Packagist"
+            allQueries = append(allQueries, q)
+        }
+        
+        // Send in batches of 100
+        for i := 0; i < len(allQueries); i += batchSize {
+            // POST to https://api.osv.dev/v1/querybatch
+        }
+    }
+    ```
+  </Step>
+  
+  <Step title="Fetch full vulnerability details">
+    For each affected package, Ward fetches complete vulnerability details including CVE IDs, severity, affected version ranges, and fixed versions.
+    
+    ```go
+    // scanner.go:156-191
+    func (s *Scanner) queryPackage(ctx context.Context, name, version string) ([]osvVuln, error) {
+        body := map[string]any{
+            "package": map[string]string{
+                "name":      name,
+                "ecosystem": "Packagist",
+            },
+            "version": version,
+        }
+        // POST to https://api.osv.dev/v1/query
+    }
+    ```
+  </Step>
+  
+  <Step title="Convert to Ward findings">
+    OSV vulnerabilities are mapped to Ward findings with severity, remediation commands, and references.
+  </Step>
+</Steps>
+
+## Implementation details
+
+Extracted from `internal/scanner/dependency/scanner.go`:
+
+### OSV.dev API endpoints
+
+```go
+// scanner.go:16-20
+const (
+    osvQueryURL = "https://api.osv.dev/v1/query"      // Single package query
+    osvBatchURL = "https://api.osv.dev/v1/querybatch" // Batch query
+    batchSize   = 100                                  // Max packages per batch
+    httpTimeout = 30 * time.Second
+)
+```
+
+### Severity mapping
+
+OSV.dev severity strings are mapped to Ward severity levels:
+
+```go
+// scanner.go:306-319
+func parseSeverity(s string) models.Severity {
+    switch strings.ToUpper(s) {
+    case "CRITICAL":
+        return models.SeverityCritical
+    case "HIGH":
+        return models.SeverityHigh
+    case "MODERATE", "MEDIUM":
+        return models.SeverityMedium
+    case "LOW":
+        return models.SeverityLow
+    default:
+        return models.SeverityMedium // default to medium for unknown
+    }
+}
+```
+
+### Fixed version extraction
+
+The scanner extracts the fixed version from OSV's affected ranges:
+
+```go
+// scanner.go:290-304
+func extractFixedVersion(affected []osvAffected, pkgName string) string {
+    for _, a := range affected {
+        if a.Package.Name != pkgName {
+            continue
+        }
+        for _, r := range a.Ranges {
+            for _, e := range r.Events {
+                if e.Fixed != "" {
+                    return e.Fixed
+                }
+            }
+        }
+    }
+    return ""
+}
+```
+
+## Coverage
+
+The dependency scanner covers **all Packagist packages**, including:
+
+- Laravel framework and first-party packages
+- Symfony components
+- Guzzle HTTP client
+- Doctrine ORM
+- Monolog logging
+- Livewire
+- Filament
+- Every other Composer dependency in your `composer.lock`
+
+There is no hardcoded advisory list — vulnerabilities are always current.
+
+## Example findings
+
+<CodeGroup>
+```json Critical Vulnerability
+{
+  "id": "CVE-2023-12345",
+  "title": "[CVE-2023-12345] guzzlehttp/guzzle@6.5.2 — Remote Code Execution via SSRF",
+  "severity": "critical",
+  "category": "Dependencies",
+  "file": "composer.lock",
+  "description": "Guzzle 6.x before 6.5.8 and 7.x before 7.4.5 allows remote attackers to execute arbitrary code via Server-Side Request Forgery (SSRF) by manipulating the HTTP client configuration.",
+  "remediation": "Upgrade guzzlehttp/guzzle to 6.5.8 or later:\n  composer require guzzlehttp/guzzle:6.5.8",
+  "references": [
+    "https://github.com/guzzle/guzzle/security/advisories/GHSA-xxxx",
+    "https://nvd.nist.gov/vuln/detail/CVE-2023-12345"
+  ]
+}
+```
+
+```json Medium Vulnerability
+{
+  "id": "GHSA-abcd-efgh-ijkl",
+  "title": "[GHSA-abcd-efgh-ijkl] symfony/http-kernel@5.4.10 — Path Traversal Vulnerability",
+  "severity": "medium",
+  "category": "Dependencies",
+  "file": "composer.lock",
+  "remediation": "Run: composer update symfony/http-kernel"
+}
+```
+</CodeGroup>
+
+## Network requirements
+
+<Warning>
+  The dependency scanner **requires internet access** to query OSV.dev. If Ward runs in an air-gapped environment, this scanner will fail.
+</Warning>
+
+To disable the dependency scanner in offline environments:
+
+```yaml ~/.ward/config.yaml
+scanners:
+  disable:
+    - dependency-scanner
+```
+
+## Performance
+
+- **Batch queries**: Packages are sent in batches of 100 to minimize HTTP requests
+- **HTTP timeout**: 30 seconds per request (configurable via source)
+- **Typical scan time**: 2-5 seconds for a Laravel project with 50-100 dependencies
+
+## Remediation workflow
+
+### Update vulnerable package
+
+```bash Terminal
+# If a fixed version is specified in the finding
+composer require guzzlehttp/guzzle:^7.4.5
+
+# If no fixed version is available, update to latest
+composer update guzzlehttp/guzzle
+```
+
+### Check what changed
+
+```bash Terminal
+composer show guzzlehttp/guzzle
+```
+
+### Re-scan to verify fix
+
+```bash Terminal
+ward scan .
+```
+
+## CI/CD integration
+
+The dependency scanner is especially valuable in CI pipelines:
+
+```yaml .github/workflows/ward.yml
+name: Security Scan
+on: [push, pull_request, schedule]
+
+jobs:
+  ward:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Ward
+        run: |
+          ward scan . --output json --fail-on high
+```
+
+<Tip>
+  Use `schedule` triggers to run Ward nightly and catch newly disclosed vulnerabilities in your dependencies.
+</Tip>
+
+## OSV.dev data structure
+
+The scanner parses this OSV.dev response format:
+
+```go
+// scanner.go:195-231
+type osvVuln struct {
+    ID               string           `json:"id"`           // CVE-2023-12345 or GHSA-xxxx
+    Summary          string           `json:"summary"`      // One-line description
+    Details          string           `json:"details"`      // Full description
+    Aliases          []string         `json:"aliases"`      // Other IDs (CVE, GHSA)
+    References       []osvReference   `json:"references"`   // Advisory URLs
+    Affected         []osvAffected    `json:"affected"`     // Version ranges
+    DatabaseSpecific osvDBSpecific    `json:"database_specific"`
+}
+
+type osvDBSpecific struct {
+    Severity string   `json:"severity"`  // CRITICAL, HIGH, MEDIUM, LOW
+    CWEIDs   []string `json:"cwe_ids"`   // CWE-79, CWE-89, etc.
+}
+```
+
+## Disabling the scanner
+
+If you use a different vulnerability scanner (Snyk, Dependabot, etc.), disable this scanner:
+
+```yaml ~/.ward/config.yaml
+scanners:
+  disable:
+    - dependency-scanner
+```
+
+## Related documentation
+
+- [CI integration](/guides/ci-integration) - Automate dependency scanning
+- [Understanding findings](/guides/understanding-findings) - Interpret CVE findings
+- [Config file](/configuration/config-file) - Scanner configuration options

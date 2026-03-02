@@ -1,0 +1,363 @@
+---
+title: 'Pattern Types'
+description: 'Pattern matching types for Ward security rules'
+---
+
+## Overview
+
+Ward supports three types of pattern matching in security rules. Each type is optimized for different use cases and provides specific matching behavior.
+
+**Source:** `internal/config/rules.go:27`
+
+## Pattern Type Reference
+
+### regex
+
+Matches lines using regular expressions (Go syntax).
+
+<ParamField path="type" type="string" value="regex">
+  Regular expression pattern matching on a line-by-line basis.
+  
+  **How it works:**
+  - Ward reads each target file line by line
+  - Applies the regex pattern to each line
+  - Creates a finding for each line that matches
+  - Captures the line number and code snippet
+  
+  **Use cases:**
+  - Detecting patterns with variations (e.g., `password\s*=`)
+  - Matching structured formats (e.g., AWS keys: `AKIA[0-9A-Z]{16}`)
+  - Complex string patterns
+  
+  **Regex syntax:** Go regular expressions (similar to PCRE)
+  - Use `\s` for whitespace
+  - Use `\$` to match literal `$`
+  - Use `[^)]` for character class negation
+  - Use `(?i)` for case-insensitive matching
+</ParamField>
+
+#### Examples
+
+```yaml
+# Detect SQL injection via DB::raw() with variables
+patterns:
+  - type: regex
+    target: php-files
+    pattern: 'DB::raw\([^)]*\$'
+```
+
+```yaml
+# Find hardcoded AWS access keys
+patterns:
+  - type: regex
+    target: php-files
+    pattern: 'AKIA[0-9A-Z]{16}'
+```
+
+```yaml
+# Detect weak password patterns (case-insensitive)
+patterns:
+  - type: regex
+    target: php-files
+    pattern: '(?i)password\s*=\s*["\']\w+["\']'
+```
+
+```yaml
+# Find eval() calls with variables
+patterns:
+  - type: regex
+    target: php-files
+    pattern: 'eval\s*\(\s*\$'
+```
+
+```yaml
+# Detect unescaped Blade output
+patterns:
+  - type: regex
+    target: blade-files
+    pattern: '\{!!\s*\$[^}]+!!\}'
+```
+
+### contains
+
+Matches lines containing an exact substring.
+
+<ParamField path="type" type="string" value="contains">
+  Simple substring matching for exact string presence.
+  
+  **How it works:**
+  - Ward checks if each line contains the exact pattern string
+  - Case-sensitive by default
+  - No special character escaping needed
+  - Faster than regex for simple strings
+  
+  **Use cases:**
+  - Detecting specific function calls (e.g., `dd(`, `eval(`)
+  - Finding exact strings (e.g., `APP_DEBUG=true`)
+  - Checking for required tokens with `negative: true`
+</ParamField>
+
+#### Examples
+
+```yaml
+# Detect debug function dd()
+patterns:
+  - type: contains
+    target: php-files
+    pattern: 'dd('
+```
+
+```yaml
+# Find dump() debugging calls
+patterns:
+  - type: contains
+    target: php-files
+    pattern: 'dump('
+```
+
+```yaml
+# Detect phpinfo() exposure
+patterns:
+  - type: contains
+    target: php-files
+    pattern: 'phpinfo()'
+```
+
+```yaml
+# Check for eval usage
+patterns:
+  - type: contains
+    target: php-files
+    pattern: 'eval('
+```
+
+```yaml
+# Find unserialize with user input
+patterns:
+  - type: contains
+    target: php-files
+    pattern: 'unserialize($_'
+```
+
+### file-exists
+
+Checks whether a file matching the target glob pattern exists.
+
+<ParamField path="type" type="string" value="file-exists">
+  Checks for the presence or absence of files matching a glob pattern.
+  
+  **How it works:**
+  - Ward evaluates the `target` glob pattern
+  - If any files match, a finding is created
+  - The `pattern` field is not used (can be omitted or empty)
+  - Useful with `negative: true` to require files
+  
+  **Use cases:**
+  - Detecting sensitive files in version control (`.env`)
+  - Ensuring required security files exist
+  - Finding debug/test files in production code
+</ParamField>
+
+#### Examples
+
+```yaml
+# Detect .env file in version control
+patterns:
+  - type: file-exists
+    target: '.env'
+    pattern: ''  # Not used for file-exists
+```
+
+```yaml
+# Find debug configuration files
+patterns:
+  - type: file-exists
+    target: 'config/debug.php'
+    pattern: ''
+```
+
+```yaml
+# Check for test credentials file
+patterns:
+  - type: file-exists
+    target: 'tests/credentials.json'
+    pattern: ''
+```
+
+```yaml
+# Ensure security.txt exists (negative pattern)
+patterns:
+  - type: file-exists
+    target: 'public/.well-known/security.txt'
+    pattern: ''
+    negative: true  # Alert if file is MISSING
+```
+
+## Negative Patterns
+
+All pattern types support `negative: true` to invert the match logic.
+
+<ParamField path="negative" type="boolean" default="false">
+  When `true`, triggers a finding when the pattern is **absent** rather than present.
+  
+  **Use cases:**
+  - Required security headers
+  - Mandatory CSRF tokens
+  - Must-have configuration
+  - Enforcing coding standards
+</ParamField>
+
+### Negative Pattern Examples
+
+```yaml
+# Ensure CSRF token is present in forms
+- id: XSS-003
+  title: "Form Missing CSRF Token"
+  patterns:
+    - type: contains
+      target: blade-files
+      pattern: "@csrf"
+      negative: true
+```
+
+```yaml
+# Require authentication middleware on admin routes
+- id: AUTH-002
+  title: "Admin Route Without Auth"
+  patterns:
+    - type: contains
+      target: routes/admin.php
+      pattern: "middleware('auth')"
+      negative: true
+```
+
+```yaml
+# Ensure security headers are configured
+- id: CONFIG-001
+  title: "Missing Security Headers"
+  patterns:
+    - type: regex
+      target: config/security.php
+      pattern: 'X-Frame-Options'
+      negative: true
+```
+
+## Exclude Patterns
+
+Reduce false positives by excluding lines that match a secondary pattern.
+
+<ParamField path="exclude_pattern" type="string">
+  Lines matching this pattern are excluded even if they match the main pattern.
+  
+  Only supported for `regex` and `contains` types (not `file-exists`).
+  
+  **Use cases:**
+  - Filter out commented code
+  - Ignore test files
+  - Skip known safe patterns
+</ParamField>
+
+### Exclude Pattern Examples
+
+```yaml
+# Find passwords but ignore comments
+patterns:
+  - type: regex
+    target: php-files
+    pattern: 'password\s*='
+    exclude_pattern: '^\s*//|^\s*/\*'
+```
+
+```yaml
+# Detect eval() but skip test files
+patterns:
+  - type: contains
+    target: php-files
+    pattern: 'eval('
+    exclude_pattern: 'tests/|Test.php'
+```
+
+```yaml
+# Find DB::raw() but exclude documented safe uses
+patterns:
+  - type: regex
+    target: php-files
+    pattern: 'DB::raw\('
+    exclude_pattern: '// SQL injection safe|// Parameterized'
+```
+
+## Pattern Matching Workflow
+
+For each rule, Ward follows this process:
+
+1. **Target Resolution** - Expand the `target` to a list of files
+2. **Pattern Application** - For each file:
+   - Read line by line
+   - Apply pattern based on `type`
+   - Check `exclude_pattern` if specified
+   - Apply `negative` logic if enabled
+3. **Finding Creation** - If match (considering negative):
+   - Extract line number
+   - Capture code snippet (±2 lines context)
+   - Create finding with rule metadata
+
+## Performance Considerations
+
+<CardGroup cols={2}>
+  <Card title="Use 'contains' for Simple Strings" icon="rabbit-running">
+    `contains` is faster than `regex` when you don't need pattern matching. Use it for exact function names or keywords.
+  </Card>
+  
+  <Card title="Narrow Your Targets" icon="bullseye-arrow">
+    Use specific targets like `config-files` instead of `php-files` to reduce scan time.
+  </Card>
+  
+  <Card title="Optimize Regex" icon="gauge-high">
+    Avoid overly complex regex patterns. Use anchors (`^`, `$`) when possible.
+  </Card>
+  
+  <Card title="Use Exclude Patterns" icon="filter">
+    Filter out false positives with `exclude_pattern` rather than manual review.
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Choose the Right Pattern Type">
+    - Use `contains` for exact strings (fastest)
+    - Use `regex` when you need pattern flexibility
+    - Use `file-exists` for presence/absence checks
+  </Accordion>
+  
+  <Accordion title="Test Your Patterns">
+    Create a test file with known violations and run Ward to verify your rule catches them:
+    
+    ```bash
+    ward scan ./test-project --output json
+    ```
+  </Accordion>
+  
+  <Accordion title="Document Complex Regex">
+    Add comments in your rule's `description` or `remediation` explaining what the regex matches:
+    
+    ```yaml
+    description: |
+      Detects DB::raw() calls with variable interpolation.
+      Pattern explanation: DB::raw\([^)]*\$
+      - DB::raw\( - Literal function call
+      - [^)]* - Any characters except closing paren
+      - \$ - Variable indicator
+    ```
+  </Accordion>
+  
+  <Accordion title="Start Broad, Then Narrow">
+    Begin with a simple pattern and add `exclude_pattern` to filter false positives rather than creating a complex regex upfront.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+- [Rule Format](/api/rule-format) - Complete YAML schema
+- [Target Types](/api/target-types) - File target reference
+- [CLI Options](/api/cli-options) - Command-line flags

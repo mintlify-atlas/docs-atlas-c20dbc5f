@@ -1,0 +1,283 @@
+---
+title: Rule Overrides
+description: How to disable rules and customize severity levels without editing rule files
+---
+
+Ward allows you to override rule behavior without editing the original rule files. You can disable specific rules or change their severity levels through the `config.yaml` file.
+
+## Why Use Overrides?
+
+Rule overrides are useful when you want to:
+
+- **Suppress false positives** — Disable rules that don't apply to your project
+- **Adjust severity** — Downgrade or upgrade rule severity for your context
+- **Maintain upgradability** — Keep built-in rules intact while customizing behavior
+- **Team standards** — Enforce team-specific severity levels across projects
+
+## Override Configuration
+
+Overrides are configured in `~/.ward/config.yaml` under the `rules` section:
+
+```yaml config.yaml
+rules:
+  disable: []
+  override: {}
+```
+
+## Disabling Rules
+
+There are two ways to disable rules:
+
+### Method 1: Disable List
+
+Add rule IDs to the `disable` array:
+
+```yaml config.yaml
+rules:
+  disable:
+    - DEBUG-001
+    - DEBUG-002
+    - AUTH-001
+```
+
+Disabled rules are completely excluded from scans. They won't appear in reports or count toward severity totals.
+
+### Method 2: Override with enabled: false
+
+Disable individual rules in the `override` map:
+
+```yaml config.yaml
+rules:
+  override:
+    DEBUG-001:
+      enabled: false
+    AUTH-001:
+      enabled: false
+```
+
+Both methods are functionally equivalent. Use `disable` for simple lists, or `override` when you also want to change severity.
+
+## Changing Severity
+
+Modify a rule's severity level without disabling it:
+
+```yaml config.yaml
+rules:
+  override:
+    DEBUG-002:
+      severity: low
+    CRYPTO-003:
+      severity: info
+    AUTH-001:
+      severity: high
+```
+
+<Note>
+Severity changes affect filtering via the `severity` config option and `--fail-on` CLI flag.
+</Note>
+
+### Valid Severity Levels
+
+- `critical` — Most severe, usually exploitable vulnerabilities
+- `high` — Serious security issues that should be fixed soon
+- `medium` — Moderate security concerns
+- `low` — Minor issues or best practices
+- `info` — Informational findings, not security-critical
+
+## Combined Example
+
+Here's a complete example showing both disabling and severity changes:
+
+```yaml config.yaml
+rules:
+  # Disable these rules entirely
+  disable:
+    - DEBUG-001  # dump() calls — we use this in development
+    - DEBUG-002  # dd() calls — we use this in development
+  
+  # Customize severity for specific rules
+  override:
+    CRYPTO-003:  # md5/sha1 usage
+      severity: low  # downgrade from medium (we use md5 for non-security checksums)
+    
+    AUTH-001:  # missing middleware
+      severity: critical  # upgrade from high (our security policy)
+    
+    SECRETS-001:  # hardcoded passwords
+      enabled: false  # disable (alternative to 'disable' list)
+```
+
+## Override Processing
+
+Ward applies overrides during rule loading (internal/config/rules.go:115-140):
+
+1. **Load all rules** — From `~/.ward/rules/` and `custom_dirs`
+2. **Apply disable list** — Remove rules in `rules.disable`
+3. **Apply override map** — For each rule in `rules.override`:
+   - If `severity` is set, replace the rule's severity
+   - If `enabled: false`, exclude the rule (same as `disable`)
+4. **Return final rule set** — Only enabled rules with adjusted severities
+
+## Common Use Cases
+
+### Disable Debug Rules in Development
+
+```yaml config.yaml
+rules:
+  disable:
+    - DEBUG-001  # dump()
+    - DEBUG-002  # dd()
+    - DEBUG-003  # var_dump()
+    - DEBUG-004  # print_r()
+```
+
+### Downgrade Crypto Warnings
+
+If you use MD5/SHA1 for non-security purposes (e.g., cache keys, ETags):
+
+```yaml config.yaml
+rules:
+  override:
+    CRYPTO-001:  # md5()
+      severity: info
+    CRYPTO-002:  # sha1()
+      severity: info
+```
+
+### Upgrade Auth Issues to Critical
+
+Enforce strict authentication standards:
+
+```yaml config.yaml
+rules:
+  override:
+    AUTH-001:  # missing auth middleware
+      severity: critical
+    AUTH-002:  # missing rate limiting
+      severity: critical
+    AUTH-003:  # loginUsingId() without validation
+      severity: critical
+```
+
+### Disable False Positives
+
+If a rule produces false positives for your codebase:
+
+```yaml config.yaml
+rules:
+  disable:
+    - INJECTION-003  # eval() — we never use eval()
+    - XSS-002  # {!! !!} — we sanitize before using
+```
+
+## Per-Project Overrides
+
+<Warning>
+Per-project `.ward.yaml` config is planned but not yet implemented. Currently, all overrides are global via `~/.ward/config.yaml`.
+</Warning>
+
+Until per-project config is available, you can:
+
+1. **Use `custom_dirs`** — Load project-specific rules from `./ward-rules/`
+2. **CI environment** — Use different `~/.ward/config.yaml` files per CI job
+3. **Baseline suppression** — Use `--baseline` to suppress known findings per project
+
+## Severity Filtering
+
+Override severity affects global severity filtering:
+
+```yaml config.yaml
+severity: medium  # only report Medium, High, Critical
+
+rules:
+  override:
+    DEBUG-002:
+      severity: low  # this rule is now BELOW the threshold, won't be reported
+```
+
+If you downgrade a rule's severity below the global `severity` threshold, findings from that rule won't appear in reports.
+
+## CI Fail Thresholds
+
+Override severity also affects `--fail-on` behavior:
+
+```bash
+ward scan . --fail-on high
+```
+
+If you upgrade a rule to `critical` or `high`, it will trigger failures. If you downgrade to `low` or `info`, it won't.
+
+## Viewing Active Rules
+
+<Tip>
+To see which rules are active after overrides, check the scan report's rule list or run `ward scan` with verbose logging.
+</Tip>
+
+The JSON report includes all findings with their effective severity:
+
+```json
+{
+  "findings": [
+    {
+      "id": "DEBUG-002",
+      "severity": "Low",  // overridden from Medium
+      ...
+    }
+  ]
+}
+```
+
+## Override vs. Custom Rules
+
+| Use Case | Overrides | Custom Rules |
+|----------|-----------|-------------|
+| Disable built-in rule | ✅ `disable: [RULE-ID]` | ❌ Not applicable |
+| Change severity | ✅ `override.RULE-ID.severity` | ❌ Must edit rule file |
+| Add new rule | ❌ Not applicable | ✅ Create `.yaml` in `~/.ward/rules/` |
+| Modify pattern | ❌ Not supported | ✅ Edit rule file |
+| Team-wide changes | ✅ Share `config.yaml` | ✅ Share rule directory |
+
+**Rule of thumb:**
+- Use **overrides** for tweaking existing rules without editing files
+- Use **custom rules** for adding new checks or heavily modifying patterns
+
+## Example: Staging vs. Production
+
+You can use different override configurations for different environments:
+
+**Staging (lenient):**
+```yaml ~/.ward/config.staging.yaml
+severity: low
+rules:
+  disable:
+    - DEBUG-001
+    - DEBUG-002
+  override:
+    CRYPTO-001:
+      severity: info
+```
+
+**Production (strict):**
+```yaml ~/.ward/config.production.yaml
+severity: medium
+rules:
+  disable: []  # no disabled rules
+  override:
+    AUTH-001:
+      severity: critical
+    SECRETS-001:
+      severity: critical
+```
+
+Then swap config files based on environment:
+
+```bash
+cp ~/.ward/config.production.yaml ~/.ward/config.yaml
+ward scan .
+```
+
+## Related Pages
+
+- [Configuration File](/configuration/config-file) — Main config.yaml structure
+- [Custom Rules](/configuration/custom-rules) — Writing your own rules
+- [Baseline Management](/guides/baseline-management) — Suppressing findings without disabling rules

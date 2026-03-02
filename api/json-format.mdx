@@ -1,0 +1,451 @@
+---
+title: 'JSON Report Format'
+description: 'JSON output format specification for Ward security reports'
+---
+
+## Overview
+
+Ward generates a `ward-report.json` file containing structured security scan results. This format is designed for:
+
+- Machine parsing and automation
+- Integration with custom tooling
+- CI/CD pipeline processing
+- Long-term storage and trending
+
+**Source:** `internal/reporter/json.go`, `internal/models/report.go`
+
+## Output File
+
+By default, Ward writes the JSON report to:
+
+```
+./ward-report.json
+```
+
+Customize the output directory in `~/.ward/config.yaml`:
+
+```yaml
+output:
+  formats: [json, sarif, html, markdown]
+  dir: ./reports  # ward-report.json will be in ./reports/
+```
+
+## Report Structure
+
+The JSON report has three main sections:
+
+<ResponseField name="project" type="object">
+  Project metadata and context information.
+  
+  <Expandable title="properties">
+    <ResponseField name="name" type="string">
+      Project name (from composer.json or directory name).
+      
+      ```json
+      "name": "laravel/laravel"
+      ```
+    </ResponseField>
+    
+    <ResponseField name="path" type="string">
+      Absolute path to the scanned project root.
+      
+      ```json
+      "path": "/home/user/my-laravel-app"
+      ```
+    </ResponseField>
+    
+    <ResponseField name="laravel_version" type="string">
+      Detected Laravel framework version from composer.lock.
+      
+      ```json
+      "laravel_version": "10.48.4"
+      ```
+    </ResponseField>
+    
+    <ResponseField name="php_version" type="string">
+      Required PHP version from composer.json.
+      
+      ```json
+      "php_version": "^8.1"
+      ```
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="summary" type="object">
+  Aggregate statistics about the scan results.
+  
+  <Expandable title="properties">
+    <ResponseField name="total_findings" type="integer">
+      Total number of security findings discovered.
+      
+      ```json
+      "total_findings": 23
+      ```
+    </ResponseField>
+    
+    <ResponseField name="by_severity" type="object">
+      Count of findings grouped by severity level.
+      
+      Keys: `Info`, `Low`, `Medium`, `High`, `Critical`
+      
+      ```json
+      "by_severity": {
+        "Critical": 2,
+        "High": 5,
+        "Medium": 8,
+        "Low": 6,
+        "Info": 2
+      }
+      ```
+    </ResponseField>
+    
+    <ResponseField name="duration" type="string">
+      Total scan duration as a Go duration string.
+      
+      ```json
+      "duration": "2.347s"
+      ```
+    </ResponseField>
+    
+    <ResponseField name="scanners_run" type="array[string]">
+      List of scanners that executed during the scan.
+      
+      ```json
+      "scanners_run": [
+        "env-scanner",
+        "config-scanner",
+        "dependency-scanner",
+        "rules-scanner"
+      ]
+      ```
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="findings" type="array[object]">
+  Detailed list of all security findings.
+  
+  <Expandable title="Finding object properties">
+    <ResponseField name="id" type="string">
+      Rule identifier that triggered this finding.
+      
+      ```json
+      "id": "ENV-002"
+      ```
+    </ResponseField>
+    
+    <ResponseField name="title" type="string">
+      Short description of the security issue.
+      
+      ```json
+      "title": "Debug Mode Enabled in Production"
+      ```
+    </ResponseField>
+    
+    <ResponseField name="description" type="string">
+      Detailed explanation of the security concern.
+      
+      ```json
+      "description": "APP_DEBUG is set to true, which exposes sensitive error details in production."
+      ```
+    </ResponseField>
+    
+    <ResponseField name="severity" type="string">
+      Severity level: `Info`, `Low`, `Medium`, `High`, or `Critical`.
+      
+      ```json
+      "severity": "High"
+      ```
+    </ResponseField>
+    
+    <ResponseField name="category" type="string">
+      Security category or classification.
+      
+      ```json
+      "category": "Configuration"
+      ```
+    </ResponseField>
+    
+    <ResponseField name="scanner" type="string">
+      Scanner that discovered this finding.
+      
+      ```json
+      "scanner": "env-scanner"
+      ```
+    </ResponseField>
+    
+    <ResponseField name="file" type="string">
+      Relative path to the file containing the issue.
+      
+      ```json
+      "file": ".env"
+      ```
+    </ResponseField>
+    
+    <ResponseField name="line" type="integer">
+      Line number where the issue was found (0 if not applicable).
+      
+      ```json
+      "line": 14
+      ```
+    </ResponseField>
+    
+    <ResponseField name="code_snippet" type="string">
+      Code excerpt showing the problematic line with context.
+      
+      ```json
+      "code_snippet": "APP_DEBUG=true"
+      ```
+    </ResponseField>
+    
+    <ResponseField name="remediation" type="string">
+      Instructions for fixing the issue.
+      
+      ```json
+      "remediation": "Set APP_DEBUG=false in production .env file."
+      ```
+    </ResponseField>
+    
+    <ResponseField name="references" type="array[string]">
+      URLs to external documentation or advisories.
+      
+      ```json
+      "references": [
+        "https://laravel.com/docs/configuration#debug-mode"
+      ]
+      ```
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Complete Example
+
+**Source:** `internal/reporter/json.go:64`
+
+```json
+{
+  "project": {
+    "name": "my-company/api",
+    "path": "/home/user/projects/my-api",
+    "laravel_version": "10.48.4",
+    "php_version": "^8.2"
+  },
+  "summary": {
+    "total_findings": 12,
+    "by_severity": {
+      "Critical": 1,
+      "High": 3,
+      "Medium": 5,
+      "Low": 2,
+      "Info": 1
+    },
+    "duration": "1.823s",
+    "scanners_run": [
+      "env-scanner",
+      "config-scanner",
+      "dependency-scanner",
+      "rules-scanner"
+    ]
+  },
+  "findings": [
+    {
+      "id": "ENV-003",
+      "title": "Empty or Missing APP_KEY",
+      "description": "The application encryption key is not set. This is critical for securing user sessions and encrypted data.",
+      "severity": "Critical",
+      "category": "Configuration",
+      "scanner": "env-scanner",
+      "file": ".env",
+      "line": 7,
+      "code_snippet": "APP_KEY=",
+      "remediation": "Generate a new application key by running:\n\nphp artisan key:generate\n\nThis will update your .env file with a secure random key.",
+      "references": [
+        "https://laravel.com/docs/encryption"
+      ]
+    },
+    {
+      "id": "INJECTION-001",
+      "title": "Unsafe DB::raw() with User Input",
+      "description": "Using DB::raw() with string interpolation can lead to SQL injection if user input is not properly sanitized.",
+      "severity": "Critical",
+      "category": "Injection",
+      "scanner": "rules-scanner",
+      "file": "app/Http/Controllers/UserController.php",
+      "line": 45,
+      "code_snippet": "DB::select(DB::raw(\"SELECT * FROM users WHERE id = $id\"))",
+      "remediation": "Use parameter binding instead:\n\n// Bad\nDB::raw(\"SELECT * FROM users WHERE id = $id\")\n\n// Good\nDB::table('users')->where('id', $id)->get()\nDB::select('SELECT * FROM users WHERE id = ?', [$id])",
+      "references": [
+        "https://laravel.com/docs/database#running-queries",
+        "https://owasp.org/www-community/attacks/SQL_Injection"
+      ]
+    },
+    {
+      "id": "ENV-002",
+      "title": "Debug Mode Enabled",
+      "description": "APP_DEBUG is set to true in .env. This exposes sensitive error details and stack traces in production.",
+      "severity": "High",
+      "category": "Configuration",
+      "scanner": "env-scanner",
+      "file": ".env",
+      "line": 3,
+      "code_snippet": "APP_DEBUG=true",
+      "remediation": "Set APP_DEBUG=false in production environments.",
+      "references": [
+        "https://laravel.com/docs/configuration#debug-mode"
+      ]
+    },
+    {
+      "id": "XSS-001",
+      "title": "Unescaped Blade Output",
+      "description": "Using {!! !!} syntax outputs raw, unescaped HTML which can lead to XSS attacks if the variable contains user input.",
+      "severity": "High",
+      "category": "XSS",
+      "scanner": "rules-scanner",
+      "file": "resources/views/profile/show.blade.php",
+      "line": 28,
+      "code_snippet": "{!! $user->bio !!}",
+      "remediation": "Use {{ }} syntax for automatic escaping:\n\n{{ $user->bio }}\n\nIf you need to render HTML, sanitize it first with HTMLPurifier or similar.",
+      "references": [
+        "https://laravel.com/docs/blade#displaying-data",
+        "https://owasp.org/www-community/attacks/xss/"
+      ]
+    },
+    {
+      "id": "DEBUG-001",
+      "title": "Debug Function dd() in Code",
+      "description": "The dd() debug function halts execution and dumps variables. It should not be present in production code.",
+      "severity": "Medium",
+      "category": "Debug & Logging",
+      "scanner": "rules-scanner",
+      "file": "app/Services/PaymentService.php",
+      "line": 67,
+      "code_snippet": "dd($transaction);",
+      "remediation": "Remove all dd() calls before deploying to production. Use proper logging instead:\n\nLog::debug('Transaction data', ['transaction' => $transaction]);",
+      "references": [
+        "https://laravel.com/docs/logging"
+      ]
+    }
+  ]
+}
+```
+
+## Parsing the JSON Report
+
+### Python Example
+
+```python
+import json
+
+# Load the report
+with open('ward-report.json') as f:
+    report = json.load(f)
+
+# Access project info
+print(f"Scanned: {report['project']['name']}")
+print(f"Laravel: {report['project']['laravel_version']}")
+
+# Get summary
+summary = report['summary']
+print(f"Total findings: {summary['total_findings']}")
+print(f"Critical: {summary['by_severity'].get('Critical', 0)}")
+
+# Process findings
+for finding in report['findings']:
+    if finding['severity'] in ['Critical', 'High']:
+        print(f"{finding['severity']}: {finding['title']}")
+        print(f"  File: {finding['file']}:{finding['line']}")
+        print(f"  Fix: {finding['remediation'][:100]}...")
+```
+
+### JavaScript Example
+
+```javascript
+const fs = require('fs');
+
+// Load the report
+const report = JSON.parse(fs.readFileSync('ward-report.json', 'utf8'));
+
+// Filter high-severity findings
+const criticalFindings = report.findings.filter(
+  f => f.severity === 'Critical' || f.severity === 'High'
+);
+
+console.log(`Found ${criticalFindings.length} critical/high findings`);
+
+// Group by category
+const byCategory = report.findings.reduce((acc, finding) => {
+  acc[finding.category] = (acc[finding.category] || 0) + 1;
+  return acc;
+}, {});
+
+console.log('Findings by category:', byCategory);
+```
+
+### jq Examples
+
+Query the JSON report from the command line:
+
+```bash
+# Get total findings count
+jq '.summary.total_findings' ward-report.json
+
+# List all Critical findings
+jq '.findings[] | select(.severity == "Critical") | .title' ward-report.json
+
+# Get files with findings
+jq '[.findings[].file] | unique' ward-report.json
+
+# Count findings by severity
+jq '.summary.by_severity' ward-report.json
+
+# Export Critical findings to CSV
+jq -r '.findings[] | select(.severity == "Critical") | [.id, .title, .file, .line] | @csv' ward-report.json > critical.csv
+```
+
+## CI/CD Integration
+
+### GitHub Actions
+
+```yaml
+- name: Run Ward
+  run: ward scan . --output json
+
+- name: Parse Results
+  run: |
+    CRITICAL=$(jq '.summary.by_severity.Critical // 0' ward-report.json)
+    if [ "$CRITICAL" -gt 0 ]; then
+      echo "Found $CRITICAL critical findings"
+      jq '.findings[] | select(.severity == "Critical")' ward-report.json
+      exit 1
+    fi
+```
+
+### GitLab CI
+
+```yaml
+ward-scan:
+  script:
+    - ward scan . --output json
+    - cat ward-report.json
+  artifacts:
+    reports:
+      # Use GitLab's JSON report format parser
+      codequality: ward-report.json
+    paths:
+      - ward-report.json
+```
+
+## Version Compatibility
+
+The JSON format is stable across Ward versions. New fields may be added but existing fields will not be removed or changed.
+
+<Note>
+If you rely on the JSON structure for automation, pin your Ward version in CI to avoid unexpected changes.
+</Note>
+
+## Related
+
+- [SARIF Format](/api/sarif-format) - GitHub Code Scanning integration
+- [CLI Options](/api/cli-options) - Output format configuration
+- [Exit Codes](/api/exit-codes) - CI/CD exit code handling

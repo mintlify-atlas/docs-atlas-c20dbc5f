@@ -1,0 +1,151 @@
+---
+title: Installation
+description: Install Ward via go install or build from source
+---
+
+## Requirements
+
+- Go 1.24+
+- Git (for scanning remote repositories)
+
+## Installation Methods
+
+<Tabs>
+  <Tab title="go install (Recommended)">
+    <Steps>
+      <Step title="Install Ward">
+        Install the latest version using Go's built-in package manager:
+        
+        ```bash
+        go install github.com/eljakani/ward@latest
+        ```
+        
+        <Note>
+          `@latest` resolves to the latest **Git tag** (e.g., `v0.3.0`). To install a specific version:
+          
+          ```bash
+          go install github.com/eljakani/ward@v0.3.0
+          ```
+        </Note>
+      </Step>
+      
+      <Step title="Add Go binaries to PATH">
+        Make sure `$GOPATH/bin` is in your `PATH` (Go installs binaries there):
+        
+        ```bash
+        export PATH="$PATH:$(go env GOPATH)/bin"
+        ```
+        
+        <Tip>
+          Add this line to your `~/.bashrc` or `~/.zshrc` to make it permanent:
+          
+          ```bash
+          echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.zshrc
+          ```
+        </Tip>
+      </Step>
+      
+      <Step title="Verify installation">
+        Check that Ward is installed and accessible:
+        
+        ```bash
+        ward version
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+  
+  <Tab title="Build from Source">
+    <Steps>
+      <Step title="Clone the repository">
+        ```bash
+        git clone https://github.com/Eljakani/ward.git
+        cd ward
+        ```
+      </Step>
+      
+      <Step title="Build Ward">
+        Build the binary with embedded version information:
+        
+        ```bash
+        make build
+        ```
+        
+        This creates a `./ward` binary in the current directory with embedded version, commit, and build date.
+      </Step>
+      
+      <Step title="Install to $GOPATH/bin (Optional)">
+        Install the binary to your Go bin directory:
+        
+        ```bash
+        make install
+        ```
+        
+        This installs Ward to `$GOPATH/bin`, making it accessible system-wide.
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Initialize Ward
+
+After installation, initialize Ward's configuration directory:
+
+```bash
+ward init
+```
+
+This creates `~/.ward/` with your configuration and 40 default security rules:
+
+```
+~/.ward/
+├── config.yaml            # Main configuration
+├── rules/                 # Security rules (YAML)
+│   ├── secrets.yaml       # 7 rules: hardcoded passwords, API keys, AWS creds, JWT, tokens
+│   ├── injection.yaml     # 6 rules: SQL injection, command injection, eval, unserialize
+│   ├── xss.yaml           # 4 rules: unescaped Blade output, JS injection
+│   ├── debug.yaml         # 6 rules: dd(), dump(), phpinfo(), debug bars
+│   ├── crypto.yaml        # 5 rules: md5, sha1, rand(), mcrypt, base64-as-encryption
+│   ├── security-config.yaml # 7 rules: CORS, SSL verify, CSRF, mass assignment, uploads
+│   ├── auth.yaml          # 5 rules: missing middleware, rate limiting, loginUsingId
+│   └── custom-example.yaml # Disabled template showing how to write your own rules
+├── reports/               # Scan report output
+└── store/                 # Scan history for diffing between runs
+```
+
+<Tip>
+  Use `ward init --force` to recreate config files, overwriting any existing configuration.
+</Tip>
+
+## Configuration
+
+Ward loads its config from `~/.ward/config.yaml`:
+
+```yaml
+# Minimum severity to report: info, low, medium, high, critical
+severity: info
+
+output:
+  formats: [json, sarif, html, markdown]
+  dir: ./reports
+
+scanners:
+  disable: []     # scanner names to skip, e.g. ["dependency-scanner"]
+
+rules:
+  disable: []     # rule IDs to silence, e.g. ["DEBUG-001", "AUTH-001"]
+  override:       # change severity for specific rules
+    DEBUG-002:
+      severity: low
+  # custom_dirs:  # load rules from additional directories
+  #   - /path/to/team-rules
+
+providers:
+  git_depth: 1    # shallow clone depth (0 = full history)
+```
+
+## Next Steps
+
+<Card title="Quick Start" icon="rocket" href="/quickstart">
+  Run your first Ward scan and learn the basic workflow
+</Card>

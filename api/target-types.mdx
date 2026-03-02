@@ -1,0 +1,353 @@
+---
+title: 'Target Types'
+description: 'File target types and glob patterns for Ward security rules'
+---
+
+## Overview
+
+Targets define which files Ward scans when evaluating a rule pattern. Ward provides predefined target aliases for common Laravel file types, plus support for custom glob patterns.
+
+**Source:** Documentation from README
+
+## Predefined Targets
+
+These target aliases map to specific file patterns in a Laravel project.
+
+<ParamField path="php-files" type="predefined">
+  All PHP files in the project, excluding `vendor/` directory.
+  
+  **Expands to:** `**/*.php` (recursive, skips `vendor/`)
+  
+  **Use for:**
+  - General PHP code scanning
+  - Controller, model, service class checks
+  - Any rule that applies to all PHP code
+  
+  ```yaml
+  patterns:
+    - type: regex
+      target: php-files
+      pattern: 'eval\('
+  ```
+</ParamField>
+
+<ParamField path="blade-files" type="predefined">
+  Laravel Blade template files.
+  
+  **Expands to:** `resources/views/**/*.blade.php`
+  
+  **Use for:**
+  - XSS detection (unescaped output)
+  - CSRF token checks
+  - Template security issues
+  
+  ```yaml
+  patterns:
+    - type: regex
+      target: blade-files
+      pattern: '\{!!\s*\$'
+  ```
+</ParamField>
+
+<ParamField path="config-files" type="predefined">
+  Laravel configuration files.
+  
+  **Expands to:** `config/*.php`
+  
+  **Use for:**
+  - Hardcoded credentials in config
+  - Insecure configuration values
+  - Missing security settings
+  
+  ```yaml
+  patterns:
+    - type: contains
+      target: config-files
+      pattern: 'password'
+  ```
+</ParamField>
+
+<ParamField path="env-files" type="predefined">
+  Environment variable files.
+  
+  **Expands to:** `.env`, `.env.*`
+  
+  **Use for:**
+  - Checking `.env.example` for leaked secrets
+  - Detecting `.env` in version control
+  - Environment configuration issues
+  
+  ```yaml
+  patterns:
+    - type: file-exists
+      target: env-files
+      pattern: ''
+  ```
+</ParamField>
+
+<ParamField path="routes-files" type="predefined">
+  Laravel route definition files.
+  
+  **Expands to:** `routes/*.php`
+  
+  **Use for:**
+  - Missing authentication middleware
+  - Route security configuration
+  - API protection checks
+  
+  ```yaml
+  patterns:
+    - type: contains
+      target: routes-files
+      pattern: "middleware('auth')"
+      negative: true
+  ```
+</ParamField>
+
+<ParamField path="migration-files" type="predefined">
+  Database migration files.
+  
+  **Expands to:** `database/migrations/*.php`
+  
+  **Use for:**
+  - Sensitive data in migrations
+  - Insecure default values
+  - Migration security issues
+  
+  ```yaml
+  patterns:
+    - type: regex
+      target: migration-files
+      pattern: '->default\(["\']password'
+  ```
+</ParamField>
+
+<ParamField path="js-files" type="predefined">
+  JavaScript and TypeScript files in Laravel frontend.
+  
+  **Expands to:** `resources/js/**/*.{js,ts,jsx,tsx}`
+  
+  **Use for:**
+  - Frontend security issues
+  - API key exposure in JavaScript
+  - Insecure client-side code
+  
+  ```yaml
+  patterns:
+    - type: regex
+      target: js-files
+      pattern: 'apiKey.*=.*["\'][A-Za-z0-9]{32}'
+  ```
+</ParamField>
+
+## Custom Glob Patterns
+
+You can specify any custom glob pattern as a target:
+
+```yaml
+# Specific file
+target: '.env'
+
+# Specific directory
+target: 'app/Models/*.php'
+
+# Multiple extensions
+target: 'resources/**/*.{js,ts}'
+
+# Deep recursive
+target: '**/config.php'
+```
+
+### Glob Syntax
+
+Ward uses standard glob syntax:
+
+| Pattern | Description | Example |
+|---------|-------------|----------|
+| `*` | Matches any characters (not `/`) | `*.php` matches `file.php` |
+| `**` | Matches any characters including `/` | `**/*.php` matches `app/Models/User.php` |
+| `?` | Matches single character | `file?.php` matches `file1.php` |
+| `[abc]` | Matches any character in set | `file[123].php` |
+| `{a,b}` | Matches any of the alternatives | `*.{js,ts}` matches `.js` and `.ts` |
+
+### Custom Target Examples
+
+```yaml
+# Scan only User model
+patterns:
+  - type: contains
+    target: 'app/Models/User.php'
+    pattern: '$guarded = []'
+```
+
+```yaml
+# Scan all controller files
+patterns:
+  - type: regex
+    target: 'app/Http/Controllers/**/*.php'
+    pattern: 'return view\([^,]+,\s*compact'
+```
+
+```yaml
+# Check specific config file
+patterns:
+  - type: contains
+    target: 'config/cors.php'
+    pattern: "'allowed_origins' => ['*']"
+```
+
+```yaml
+# Scan test files
+patterns:
+  - type: contains
+    target: 'tests/**/*Test.php'
+    pattern: 'actingAs($admin)'
+```
+
+```yaml
+# Multiple frontend file types
+patterns:
+  - type: regex
+    target: 'resources/**/*.{vue,js,ts}'
+    pattern: 'localStorage.setItem\(["\']token'
+```
+
+## Target Resolution
+
+When Ward processes a rule:
+
+1. **Parse target** - Determine if it's a predefined alias or custom glob
+2. **Expand to files** - Resolve the pattern to actual file paths
+3. **Apply filters** - Exclude `vendor/`, `node_modules/`, `.git/`
+4. **Return file list** - Pass matching files to pattern matcher
+
+## Target Combinations
+
+A single rule can have multiple patterns with different targets:
+
+```yaml
+rules:
+  - id: SECRET-001
+    title: "Hardcoded Credentials"
+    patterns:
+      # Check PHP files
+      - type: regex
+        target: php-files
+        pattern: 'password\s*=\s*["\']'
+      
+      # Check config files
+      - type: regex
+        target: config-files
+        pattern: 'password\s*=\s*["\']'
+      
+      # Check environment examples
+      - type: regex
+        target: '.env.example'
+        pattern: 'PASSWORD=.+'
+```
+
+A finding is created if **any** pattern matches.
+
+## Performance Optimization
+
+<CardGroup cols={2}>
+  <Card title="Use Specific Targets" icon="bullseye">
+    `config-files` is faster than `php-files` when you only need to scan configs.
+  </Card>
+  
+  <Card title="Avoid Deep Recursion" icon="folder-tree">
+    `app/Models/*.php` is faster than `**/*.php` when you know the location.
+  </Card>
+  
+  <Card title="Group Similar Patterns" icon="layer-group">
+    Multiple patterns with the same target are more efficient than separate rules.
+  </Card>
+  
+  <Card title="Exclude Vendor Code" icon="filter-slash">
+    Predefined targets automatically skip `vendor/` - use them when possible.
+  </Card>
+</CardGroup>
+
+## Excluded Directories
+
+Ward automatically excludes these directories from all scans:
+
+- `vendor/` - Composer dependencies
+- `node_modules/` - NPM dependencies
+- `.git/` - Git metadata
+- `storage/framework/` - Laravel cache/compiled files
+- `bootstrap/cache/` - Laravel bootstrap cache
+
+## Target Reference Table
+
+| Target | Path Pattern | Use Case |
+|--------|--------------|----------|
+| `php-files` | `**/*.php` (excludes vendor) | General PHP code |
+| `blade-files` | `resources/views/**/*.blade.php` | Templates, XSS |
+| `config-files` | `config/*.php` | Configuration security |
+| `env-files` | `.env`, `.env.*` | Environment secrets |
+| `routes-files` | `routes/*.php` | Route protection |
+| `migration-files` | `database/migrations/*.php` | Database schema |
+| `js-files` | `resources/js/**/*.{js,ts,jsx,tsx}` | Frontend code |
+| `app/Models/*.php` | Custom - all models | Model-specific checks |
+| `app/Http/Controllers/**/*.php` | Custom - all controllers | Controller security |
+| `.env.example` | Custom - specific file | Example file leaks |
+| `**/*.blade.php` | Custom - all Blade files | Deep Blade scan |
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Predefined Targets When Possible">
+    Predefined targets like `php-files` and `blade-files` are optimized and exclude vendor code automatically.
+    
+    ```yaml
+    # Good
+    target: blade-files
+    
+    # Less efficient
+    target: '**/*.blade.php'
+    ```
+  </Accordion>
+  
+  <Accordion title="Be Specific for Performance">
+    Narrow targets reduce scan time:
+    
+    ```yaml
+    # Fast - only 1 file
+    target: 'config/app.php'
+    
+    # Slower - all config files
+    target: config-files
+    
+    # Slowest - all PHP files
+    target: php-files
+    ```
+  </Accordion>
+  
+  <Accordion title="Test Custom Globs">
+    Verify your glob pattern matches the intended files:
+    
+    ```bash
+    # In your project directory
+    find . -path './app/Models/*.php' -type f
+    ```
+  </Accordion>
+  
+  <Accordion title="Document Custom Targets">
+    Add a comment in your rule explaining non-standard targets:
+    
+    ```yaml
+    patterns:
+      # Scan payment-related models only
+      - type: regex
+        target: 'app/Models/{Payment,Transaction,Order}.php'
+        pattern: '$guarded = \[\]'
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+- [Rule Format](/api/rule-format) - Complete YAML schema
+- [Pattern Types](/api/pattern-types) - Pattern matching reference
+- [CLI Options](/api/cli-options) - Command-line flags

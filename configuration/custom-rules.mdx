@@ -1,0 +1,392 @@
+---
+title: Custom Rules
+description: How to write and load custom security rules for Ward
+---
+
+Ward allows you to write custom security rules in YAML format. Drop `.yaml` files into `~/.ward/rules/` and Ward automatically loads them on the next scan.
+
+## Quick Start
+
+Custom rules are automatically loaded from:
+
+1. **`~/.ward/rules/`** — Your personal rules directory (created by `ward init`)
+2. **Additional directories** — Configured via `rules.custom_dirs` in `config.yaml`
+
+All `.yaml` and `.yml` files in these directories are loaded and merged with the built-in rules.
+
+## Rule File Structure
+
+Each rule file contains a `rules` array with one or more rule definitions:
+
+```yaml
+rules:
+  - id: TEAM-001
+    title: "Hardcoded internal service URL"
+    description: "Detects hardcoded URLs to internal services."
+    severity: medium
+    category: Configuration
+    enabled: true
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: 'https?://internal-service\.\w+'
+    remediation: |
+      Use environment variables:
+        $url = env('INTERNAL_SERVICE_URL');
+    references:
+      - https://laravel.com/docs/configuration#environment-variables
+```
+
+## Rule Definition Fields
+
+### Required Fields
+
+<ParamField path="id" type="string" required>
+  Unique identifier for the rule. Must be unique across all loaded rules.
+  
+  **Naming convention:** Use a prefix like `TEAM-`, `CUSTOM-`, or your organization code.
+  
+  Example: `TEAM-001`, `ACME-SEC-042`
+</ParamField>
+
+<ParamField path="title" type="string" required>
+  Short, descriptive title for the finding. Displayed in reports and TUI.
+  
+  Example: `"Hardcoded database credentials"`
+</ParamField>
+
+<ParamField path="description" type="string" required>
+  Detailed explanation of what the rule detects and why it's a security concern.
+  
+  Example:
+  ```yaml
+  description: |
+    Database credentials should never be hardcoded in source files.
+    Use environment variables via the .env file instead.
+  ```
+</ParamField>
+
+<ParamField path="severity" type="string" required>
+  Severity level for findings from this rule.
+  
+  **Valid values:** `critical`, `high`, `medium`, `low`, `info`
+  
+  Example: `severity: high`
+</ParamField>
+
+<ParamField path="category" type="string" required>
+  Category for grouping findings in reports.
+  
+  **Common categories:** `Secrets`, `Injection`, `XSS`, `Debug`, `Crypto`, `Configuration`, `Authentication`, `Authorization`
+  
+  Example: `category: Secrets`
+</ParamField>
+
+<ParamField path="enabled" type="boolean" required>
+  Whether the rule is active. Set to `false` to temporarily disable without deleting.
+  
+  Example: `enabled: true`
+</ParamField>
+
+<ParamField path="patterns" type="array" required>
+  List of pattern definitions that trigger the rule. See [Pattern Types](#pattern-types) below.
+  
+  Example:
+  ```yaml
+  patterns:
+    - type: regex
+      target: php-files
+      pattern: 'password\s*=\s*["\']\w+["\']'
+  ```
+</ParamField>
+
+### Optional Fields
+
+<ParamField path="remediation" type="string">
+  Guidance on how to fix the finding. Supports multi-line text.
+  
+  Example:
+  ```yaml
+  remediation: |
+    Replace hardcoded credentials with environment variables:
+      $password = env('DB_PASSWORD');
+    
+    Add the real password to your .env file:
+      DB_PASSWORD=your-secure-password
+  ```
+</ParamField>
+
+<ParamField path="references" type="array">
+  List of URLs for additional documentation or context.
+  
+  Example:
+  ```yaml
+  references:
+    - https://laravel.com/docs/configuration
+    - https://owasp.org/www-community/vulnerabilities/Hardcoded_Password
+  ```
+</ParamField>
+
+<ParamField path="tags" type="array">
+  Additional tags for filtering or categorization.
+  
+  Example:
+  ```yaml
+  tags:
+    - owasp-a02
+    - pci-dss
+  ```
+</ParamField>
+
+## Pattern Types
+
+Each pattern in the `patterns` array must specify a `type`, `target`, and `pattern`.
+
+### Regex Pattern
+
+Matches a regular expression against file contents line-by-line.
+
+```yaml
+patterns:
+  - type: regex
+    target: php-files
+    pattern: '\$password\s*=\s*["\']\w+["\']'
+```
+
+<Note>
+Regex patterns use Go's RE2 syntax. Backslashes must be escaped in YAML strings (`\\` for literal backslash).
+</Note>
+
+### Contains Pattern
+
+Matches an exact substring in file contents.
+
+```yaml
+patterns:
+  - type: contains
+    target: blade-files
+    pattern: '{!! $userInput !!}'
+```
+
+### File-Exists Pattern
+
+Checks whether a file matching the glob pattern exists.
+
+```yaml
+patterns:
+  - type: file-exists
+    target: .env.production
+    pattern: ''
+```
+
+## Pattern Targets
+
+The `target` field specifies which files to search.
+
+### Built-in Targets
+
+| Target | Files Matched |
+|--------|---------------|
+| `php-files` | All `.php` files (recursive, skips `vendor/`) |
+| `blade-files` | `resources/views/**/*.blade.php` |
+| `config-files` | `config/*.php` |
+| `env-files` | `.env`, `.env.*` |
+| `routes-files` | `routes/*.php` |
+| `migration-files` | `database/migrations/*.php` |
+| `js-files` | `resources/js/**/*.{js,ts,jsx,tsx}` |
+
+### Custom Glob Patterns
+
+You can also use any custom glob pattern as a target:
+
+```yaml
+patterns:
+  - type: regex
+    target: 'app/Services/**/*.php'
+    pattern: 'curl_exec\('
+```
+
+## Advanced Pattern Options
+
+### Negative Patterns
+
+Set `negative: true` to trigger when a pattern is **absent**. Useful for "must have X" checks.
+
+```yaml
+rules:
+  - id: CUSTOM-001
+    title: "Missing CSRF directive in form"
+    description: "Blade forms must include @csrf directive."
+    severity: high
+    category: Configuration
+    enabled: true
+    patterns:
+      - type: contains
+        target: blade-files
+        pattern: '<form'
+      - type: contains
+        target: blade-files
+        pattern: '@csrf'
+        negative: true  # fire if @csrf is NOT found
+    remediation: |
+      Add @csrf inside every Blade form:
+        <form method="POST" action="/profile">
+            @csrf
+            ...
+        </form>
+```
+
+### Exclude Pattern
+
+Use `exclude_pattern` to skip matches that also match a secondary pattern. Reduces false positives.
+
+```yaml
+patterns:
+  - type: regex
+    target: php-files
+    pattern: 'DB::raw\('
+    exclude_pattern: '// safe: audited'  # skip lines with this comment
+```
+
+## Custom Rule Example
+
+Here's a complete example from `~/.ward/rules/custom-example.yaml`:
+
+```yaml custom-example.yaml
+rules:
+  - id: MY-001
+    title: "Example: Hardcoded internal URL"
+    description: "Detects hardcoded internal URLs that should use configuration."
+    severity: low
+    category: Configuration
+    enabled: false
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: 'https?://localhost:\d{4}'
+    remediation: |
+      Replace hardcoded URLs with environment variables:
+        $url = env('INTERNAL_SERVICE_URL');
+
+  - id: MY-002
+    title: "Example: Missing CSRF directive in Blade form"
+    description: >
+      A <form> tag in a Blade template does not include @csrf.
+      This rule uses the 'negative' option — it triggers when @csrf is absent
+      from a file that contains a <form> tag.
+    severity: medium
+    category: Configuration
+    enabled: false
+    patterns:
+      - type: contains
+        target: blade-files
+        pattern: "<form"
+      - type: contains
+        target: blade-files
+        pattern: "@csrf"
+        negative: true
+    remediation: |
+      Add @csrf inside every Blade form:
+        <form method="POST" action="/profile">
+            @csrf
+            ...
+        </form>
+```
+
+## Loading Custom Rule Directories
+
+To load rules from additional directories (e.g., team-wide or project-specific rules), add them to your `config.yaml`:
+
+```yaml config.yaml
+rules:
+  custom_dirs:
+    - /path/to/team-rules
+    - ./project-specific-rules
+```
+
+Ward will recursively load all `.yaml` and `.yml` files from these directories (internal/config/rules.go:54-82).
+
+## Rule Loading Process
+
+Ward loads rules in the following order (internal/config/rules.go:86-113):
+
+1. **Built-in rules** — Embedded in the binary from `internal/config/defaults/rules/`
+2. **User rules** — From `~/.ward/rules/`
+3. **Custom directories** — From `rules.custom_dirs` in `config.yaml`
+4. **Overrides applied** — `rules.disable` and `rules.override` from `config.yaml`
+
+## Testing Custom Rules
+
+After creating a custom rule:
+
+1. Save the `.yaml` file in `~/.ward/rules/`
+2. Run `ward scan /path/to/test-project`
+3. Check the report for findings from your rule ID
+
+<Tip>
+Set `enabled: false` initially and test with a small project to verify pattern accuracy before enabling in production.
+</Tip>
+
+## Common Use Cases
+
+### Detect Missing Authorization Checks
+
+```yaml
+rules:
+  - id: TEAM-AUTH-001
+    title: "Controller method missing authorization"
+    description: "Public controller methods should call $this->authorize()."
+    severity: high
+    category: Authorization
+    enabled: true
+    patterns:
+      - type: regex
+        target: 'app/Http/Controllers/**/*.php'
+        pattern: 'public function (?!__construct)'
+      - type: regex
+        target: 'app/Http/Controllers/**/*.php'
+        pattern: '\$this->authorize\('
+        negative: true
+```
+
+### Detect Unsafe File Uploads
+
+```yaml
+rules:
+  - id: TEAM-FILE-001
+    title: "File upload without validation"
+    description: "File uploads should validate MIME type and extension."
+    severity: medium
+    category: Security
+    enabled: true
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: '->store\(|->storeAs\('
+      - type: regex
+        target: php-files
+        pattern: 'mimes:|mimetypes:'
+        negative: true
+```
+
+### Detect Hardcoded Team URLs
+
+```yaml
+rules:
+  - id: ACME-001
+    title: "Hardcoded Acme Corp internal URL"
+    description: "Use env('ACME_SERVICE_URL') instead."
+    severity: low
+    category: Configuration
+    enabled: true
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: 'https?://[a-z-]+\.acme\.internal'
+```
+
+## Related Pages
+
+- [Configuration File](/configuration/config-file) — Main config.yaml structure
+- [Rule Overrides](/configuration/rule-overrides) — Disabling and customizing rules
+- [Rules Scanner](/scanners/rules-scanner) — Default rules included with Ward

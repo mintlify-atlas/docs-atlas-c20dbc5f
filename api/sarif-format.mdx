@@ -1,0 +1,505 @@
+---
+title: 'SARIF Report Format'
+description: 'SARIF 2.1.0 output format for GitHub Code Scanning and IDE integration'
+---
+
+## Overview
+
+Ward generates SARIF (Static Analysis Results Interchange Format) 2.1.0 reports for integration with:
+
+- **GitHub Code Scanning** - Security findings appear in the Security tab
+- **Visual Studio Code** - SARIF Viewer extension
+- **Azure DevOps** - Code analysis results
+- **Other SARIF-compatible tools**
+
+SARIF is a standardized format for static analysis tools defined by OASIS.
+
+**Source:** `internal/reporter/sarif.go`
+
+## Output File
+
+Ward generates:
+
+```
+./ward-report.sarif
+```
+
+Customize the output directory in `~/.ward/config.yaml`:
+
+```yaml
+output:
+  formats: [json, sarif]  # Enable SARIF generation
+  dir: ./reports
+```
+
+## SARIF Structure
+
+Ward's SARIF output follows the 2.1.0 specification:
+
+<ResponseField name="$schema" type="string">
+  SARIF schema URL.
+  
+  ```json
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json"
+  ```
+</ResponseField>
+
+<ResponseField name="version" type="string">
+  SARIF format version.
+  
+  ```json
+  "version": "2.1.0"
+  ```
+</ResponseField>
+
+<ResponseField name="runs" type="array[object]">
+  Array of scan runs (Ward generates one run per scan).
+  
+  <Expandable title="Run object properties">
+    <ResponseField name="tool" type="object">
+      Information about the analysis tool (Ward).
+      
+      <Expandable title="tool.driver properties">
+        <ResponseField name="name" type="string">
+          Tool name: `"Ward"`
+        </ResponseField>
+        
+        <ResponseField name="informationUri" type="string">
+          Tool homepage: `"https://github.com/Eljakani/ward"`
+        </ResponseField>
+        
+        <ResponseField name="version" type="string">
+          Ward version that generated the report (e.g., `"v0.3.0"`)
+        </ResponseField>
+        
+        <ResponseField name="semanticVersion" type="string">
+          Semantic version (same as version)
+        </ResponseField>
+        
+        <ResponseField name="rules" type="array[object]">
+          Array of rule definitions for all findings in this run.
+          
+          Each rule includes:
+          - `id` - Rule identifier (e.g., `"ENV-002"`)
+          - `name` - Rule title
+          - `shortDescription` - Brief description
+          - `fullDescription` - Detailed description
+          - `defaultConfiguration.level` - SARIF severity level
+          - `help` - Remediation guidance
+          - `properties.tags` - Categories
+          - `properties.security-severity` - Numeric severity
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+    
+    <ResponseField name="results" type="array[object]">
+      Array of findings (results).
+      
+      <Expandable title="Result object properties">
+        <ResponseField name="ruleId" type="string">
+          Rule identifier that triggered this result.
+          
+          ```json
+          "ruleId": "ENV-002"
+          ```
+        </ResponseField>
+        
+        <ResponseField name="ruleIndex" type="integer">
+          Index into the `runs[].tool.driver.rules` array.
+        </ResponseField>
+        
+        <ResponseField name="level" type="string">
+          SARIF severity level: `"error"`, `"warning"`, or `"note"`.
+          
+          **Mapping:**
+          - Critical/High → `"error"`
+          - Medium → `"warning"`
+          - Low/Info → `"note"`
+        </ResponseField>
+        
+        <ResponseField name="message" type="object">
+          Result message (finding title).
+          
+          ```json
+          "message": {
+            "text": "Debug Mode Enabled"
+          }
+          ```
+        </ResponseField>
+        
+        <ResponseField name="locations" type="array[object]">
+          File locations where the issue was found.
+          
+          Each location includes:
+          - `physicalLocation.artifactLocation.uri` - Relative file path
+          - `physicalLocation.region.startLine` - Line number
+          - `physicalLocation.region.snippet.text` - Code snippet (optional)
+        </ResponseField>
+        
+        <ResponseField name="partialFingerprints" type="object">
+          Stable fingerprint for deduplication across scans.
+          
+          ```json
+          "partialFingerprints": {
+            "primaryLocationLineHash/v1": "8f3a2b1c..."
+          }
+          ```
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Severity Mapping
+
+Ward severities map to SARIF levels:
+
+**Source:** `internal/reporter/sarif.go:118`
+
+```go
+func severityToSARIFLevel(s models.Severity) string {
+    switch s {
+    case models.SeverityCritical, models.SeverityHigh:
+        return "error"
+    case models.SeverityMedium:
+        return "warning"
+    default:
+        return "note"
+    }
+}
+```
+
+| Ward Severity | SARIF Level | GitHub Display |
+|---------------|-------------|----------------|
+| Critical | `error` | Red, "Error" badge |
+| High | `error` | Red, "Error" badge |
+| Medium | `warning` | Yellow, "Warning" badge |
+| Low | `note` | Blue, "Note" badge |
+| Info | `note` | Blue, "Note" badge |
+
+## Example SARIF Output
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Ward",
+          "informationUri": "https://github.com/Eljakani/ward",
+          "version": "v0.3.0",
+          "semanticVersion": "v0.3.0",
+          "rules": [
+            {
+              "id": "ENV-002",
+              "name": "Debug Mode Enabled",
+              "shortDescription": {
+                "text": "Debug Mode Enabled"
+              },
+              "fullDescription": {
+                "text": "APP_DEBUG is set to true in .env. This exposes sensitive error details and stack traces."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "help": {
+                "text": "Set APP_DEBUG=false in production environments."
+              },
+              "properties": {
+                "tags": ["Configuration"],
+                "security-severity": "high"
+              }
+            },
+            {
+              "id": "XSS-001",
+              "name": "Unescaped Blade Output",
+              "shortDescription": {
+                "text": "Unescaped Blade Output"
+              },
+              "fullDescription": {
+                "text": "Using {!! !!} syntax outputs raw HTML which can lead to XSS attacks."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "help": {
+                "text": "Use {{ }} syntax for automatic escaping."
+              },
+              "properties": {
+                "tags": ["XSS"],
+                "security-severity": "high"
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "ENV-002",
+          "ruleIndex": 0,
+          "level": "error",
+          "message": {
+            "text": "Debug Mode Enabled"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".env"
+                },
+                "region": {
+                  "startLine": 3,
+                  "snippet": {
+                    "text": "APP_DEBUG=true"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash/v1": "a3f8b9c2d1e4f5a6"
+          }
+        },
+        {
+          "ruleId": "XSS-001",
+          "ruleIndex": 1,
+          "level": "error",
+          "message": {
+            "text": "Unescaped Blade Output"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "resources/views/profile/show.blade.php"
+                },
+                "region": {
+                  "startLine": 28,
+                  "snippet": {
+                    "text": "{!! $user->bio !!}"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash/v1": "b7c3d4e5f6a1b2c3"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+## GitHub Code Scanning Integration
+
+Upload SARIF reports to GitHub to display findings in the Security tab.
+
+### GitHub Actions Workflow
+
+```yaml
+name: Ward Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ward-scan:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      # Required for uploading SARIF
+      security-events: write
+      # Required for private repositories
+      contents: read
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Install Ward
+        run: go install github.com/eljakani/ward@latest
+      
+      - name: Run Ward Scan
+        run: |
+          ward init
+          ward scan . --output sarif
+      
+      - name: Upload SARIF to GitHub
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ward-report.sarif
+        # Run even if scan fails
+        if: always()
+```
+
+### Viewing Results in GitHub
+
+After upload:
+
+1. Navigate to **Security** → **Code scanning**
+2. Findings appear grouped by severity
+3. Click a finding to see:
+   - File location with code snippet
+   - Rule description and remediation
+   - Severity and category
+
+### SARIF Upload Requirements
+
+<Warning>
+**Permissions Required:**
+
+Your workflow must have `security-events: write` permission to upload SARIF files.
+
+For private repositories, also add `contents: read`.
+</Warning>
+
+<Note>
+**GitHub Free Limitations:**
+
+Code Scanning with custom tools (like Ward) is free for public repositories. Private repositories require GitHub Advanced Security.
+</Note>
+
+## IDE Integration
+
+### Visual Studio Code
+
+1. Install the [SARIF Viewer extension](https://marketplace.visualstudio.com/items?itemName=MS-SarifVSCode.sarif-viewer)
+2. Run Ward: `ward scan . --output sarif`
+3. Open `ward-report.sarif` in VS Code
+4. Findings appear in the Problems panel with file navigation
+
+### JetBrains IDEs (PHPStorm, IntelliJ)
+
+1. Install the [SARIF Plugin](https://plugins.jetbrains.com/plugin/16799-sarif)
+2. Generate report: `ward scan . --output sarif`
+3. Open the SARIF file
+4. Navigate findings with code highlighting
+
+## SARIF Validation
+
+Validate Ward's SARIF output:
+
+```bash
+# Using Microsoft's SARIF validator
+npm install -g @microsoft/sarif-multitool
+sarif validate ward-report.sarif
+```
+
+## Fingerprinting
+
+**Source:** `internal/models/finding.go:25`
+
+Ward generates stable fingerprints for deduplication:
+
+```go
+func (f Finding) Fingerprint() string {
+    h := sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%d", f.ID, f.File, f.Line)))
+    return fmt.Sprintf("%x", h[:12]) // 24-char hex
+}
+```
+
+Fingerprints remain consistent across scans unless:
+- The rule ID changes
+- The file path changes
+- The line number changes
+
+This allows GitHub to:
+- Track when findings are fixed
+- Avoid duplicate alerts
+- Show trends over time
+
+## Advanced Usage
+
+### Combining SARIF with Other Formats
+
+```bash
+# Generate JSON (for automation) + SARIF (for GitHub)
+ward scan . --output json,sarif
+```
+
+### Filtering SARIF Results
+
+Use `jq` to filter SARIF before upload:
+
+```bash
+# Only upload Critical/High findings
+jq '.runs[0].results |= map(select(.level == "error"))' \
+  ward-report.sarif > filtered.sarif
+```
+
+### Multiple SARIF Uploads
+
+```yaml
+# Upload Ward results with a category
+- name: Upload Ward SARIF
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: ward-report.sarif
+    category: ward-security
+
+# Also upload another tool's results
+- name: Upload PHPStan SARIF
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: phpstan-report.sarif
+    category: phpstan-quality
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="SARIF Upload Fails: 'Permission Denied'">
+    Add permissions to your workflow:
+    
+    ```yaml
+    permissions:
+      security-events: write
+      contents: read
+    ```
+  </Accordion>
+  
+  <Accordion title="Findings Don't Appear in GitHub">
+    Check:
+    - Workflow completed successfully
+    - `upload-sarif` step ran (use `if: always()`)
+    - Repository has Code Scanning enabled (private repos need Advanced Security)
+    - SARIF file is valid: `sarif validate ward-report.sarif`
+  </Accordion>
+  
+  <Accordion title="Too Many Findings Uploaded">
+    GitHub has a limit of 5000 results per SARIF upload. Filter before uploading:
+    
+    ```bash
+    # Only Critical/High
+    ward scan . --fail-on high --output sarif
+    ```
+  </Accordion>
+  
+  <Accordion title="SARIF Schema Validation Errors">
+    Ensure you're using a recent Ward version:
+    
+    ```bash
+    ward version
+    go install github.com/eljakani/ward@latest
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Specification Reference
+
+- [SARIF 2.1.0 Specification](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
+- [GitHub Code Scanning Documentation](https://docs.github.com/en/code-security/code-scanning/integrating-with-code-scanning/sarif-support-for-code-scanning)
+- [Microsoft SARIF Tutorials](https://github.com/microsoft/sarif-tutorials)
+
+## Related
+
+- [JSON Format](/api/json-format) - Machine-readable report format
+- [CLI Options](/api/cli-options) - Output configuration
+- [Exit Codes](/api/exit-codes) - CI/CD integration

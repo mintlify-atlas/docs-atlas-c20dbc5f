@@ -1,0 +1,175 @@
+---
+title: ward scan
+description: Scan a Laravel project for security vulnerabilities
+---
+
+The `ward scan` command analyzes Laravel projects for security issues, misconfigurations, and vulnerabilities.
+
+## Usage
+
+```bash
+ward scan [path] [flags]
+```
+
+The `path` argument can be:
+- A local directory path (e.g., `./my-laravel-app`)
+- A Git repository URL (Ward will clone and scan it)
+
+## Output Modes
+
+Ward supports two scan modes:
+
+### Interactive TUI Mode (Default)
+
+When running in a terminal with TTY support, Ward launches an interactive terminal UI with:
+- Real-time scan progress
+- Organized findings by severity
+- Detailed finding information
+- Export options
+
+### Headless Mode
+
+Activated when:
+- Using `--output` with specific formats
+- Running in a non-TTY environment (CI/CD pipelines)
+- No terminal is available
+
+Headless mode prints scan progress and findings to stdout.
+
+## Options
+
+<ParamField path="path" type="string" required>
+  Path to Laravel project directory or Git repository URL to scan
+</ParamField>
+
+<ParamField path="--output, -o" type="string" default="tui">
+  Output mode and formats. Use `tui` for interactive mode, or comma-separated formats: `json`, `sarif`, `html`, `markdown`
+  
+  Examples:
+  - `--output json` - Generate JSON report only
+  - `--output json,sarif,html` - Generate multiple formats
+</ParamField>
+
+<ParamField path="--fail-on" type="string">
+  Exit with code 1 if findings at or above this severity level are found.
+  
+  Valid values: `info`, `low`, `medium`, `high`, `critical`
+  
+  Useful for CI/CD pipelines to enforce security policies.
+</ParamField>
+
+<ParamField path="--baseline" type="string">
+  Path to baseline file containing known findings to suppress.
+  
+  Ward will only report new findings not present in the baseline, helping you focus on newly introduced issues.
+</ParamField>
+
+<ParamField path="--update-baseline" type="string">
+  Save current scan findings as a new baseline file at the specified path.
+  
+  Use this to create or update a baseline after reviewing and accepting current findings.
+</ParamField>
+
+## Examples
+
+### Scan Local Project
+
+Scan a Laravel project in the current directory:
+
+```bash
+ward scan .
+```
+
+Scan a specific directory:
+
+```bash
+ward scan ~/projects/my-laravel-app
+```
+
+### Scan Git Repository
+
+Ward can clone and scan remote repositories:
+
+```bash
+ward scan https://github.com/username/laravel-project
+```
+
+### Generate JSON Report
+
+Run headless scan with JSON output:
+
+```bash
+ward scan . --output json
+```
+
+Example output:
+```
+  ● Initializing scan
+  ● Loading rules
+  ● Scanning filesystem
+    [CRITICAL] Debug mode enabled in production
+    [HIGH] Hardcoded API credentials
+  ✓ Configuration Scanner — 2 findings
+
+  Done. 2 findings in 1.234s
+    CRITICAL   1
+    HIGH       1
+```
+
+### Multiple Output Formats
+
+Generate multiple report formats:
+
+```bash
+ward scan . --output json,sarif,html,markdown
+```
+
+### Fail on High Severity
+
+Exit with error code if high or critical findings are detected:
+
+```bash
+ward scan . --fail-on high
+```
+
+If high or critical findings exist, Ward exits with code 1 and shows:
+```
+Error: findings exceed --fail-on high threshold: 1 critical, 2 high
+```
+
+### Using Baselines
+
+Create a baseline from current findings:
+
+```bash
+ward scan . --update-baseline baseline.json
+```
+
+Scan and suppress baseline findings:
+
+```bash
+ward scan . --baseline baseline.json
+```
+
+This only shows new findings introduced since the baseline was created.
+
+### CI/CD Pipeline Example
+
+Combine flags for continuous integration:
+
+```bash
+ward scan . --output json,sarif --fail-on high --baseline main-baseline.json
+```
+
+This will:
+1. Run in headless mode
+2. Generate JSON and SARIF reports
+3. Compare against baseline
+4. Fail the build if new high/critical issues are found
+
+## Exit Codes
+
+- **0** - Scan completed successfully with no failures
+- **1** - Scan found issues exceeding `--fail-on` threshold, or an error occurred
+
+The `--fail-on` flag makes Ward exit with code 1 when findings at or above the specified severity level are detected.

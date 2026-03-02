@@ -1,0 +1,68 @@
+---
+title: ward version
+description: Display Ward version information
+---
+
+The `ward version` command prints version details about the Ward CLI installation.
+
+## Usage
+
+```bash
+ward version
+```
+
+## Output
+
+The command displays:
+
+- **Version** - The Ward release version (e.g., `v0.3.0`)
+- **Commit** - Git commit hash of the build
+- **Built** - Build timestamp
+
+## Example
+
+```bash
+ward version
+```
+
+Example output:
+
+```
+  Version: v0.3.0
+  Commit:  a1b2c3d
+  Built:   2026-03-01T14:30:00Z
+```
+
+## Version Detection
+
+Ward automatically detects version information from multiple sources:
+
+1. **Build-time ldflags** - When built with `go build -ldflags`
+2. **Go module metadata** - When installed via `go install github.com/eljakani/ward@v0.3.0`
+3. **VCS information** - Git commit hash from build metadata
+
+If installed via `go install`, the version will match the specified tag:
+
+```bash
+go install github.com/eljakani/ward@v0.3.0
+ward version
+```
+
+Output:
+```
+  Version: v0.3.0
+  Commit:  a1b2c3d
+  Built:   2026-03-01T14:30:00Z
+```
+
+## Development Builds
+
+Development builds show:
+
+```
+  Version: dev
+  Commit:  none
+  Built:   unknown
+```
+
+This indicates Ward was built from source without version metadata.

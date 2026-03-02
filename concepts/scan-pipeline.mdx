@@ -1,0 +1,639 @@
+---
+title: Scan Pipeline
+description: Ward's 5-stage pipeline from source acquisition to report generation
+---
+
+## Pipeline Overview
+
+Ward executes scans through a sequential 5-stage pipeline. Each stage has a specific responsibility and publishes events to track progress:
+
+```
+Provider  →  Resolvers  →  Scanners  →  Post-Process  →  Report
+```
+
+**Implementation:** `internal/orchestrator/orchestrator.go:49-271`
+
+## Stage 1: Provider
+
+**Purpose:** Locate and prepare your project source code for scanning.
+
+The Provider stage determines where the project code comes from and ensures it's accessible for analysis.
+
+### Provider Types
+
+<Tabs>
+  <Tab title="Local Provider">
+    **Source:** `internal/provider/local.go`
+
+    Scans a project from the local filesystem.
+
+    **What it does:**
+    - Validates the path exists and is accessible
+    - Checks for Laravel indicators (`composer.json`, `artisan`)
+    - Returns the absolute path to the project root
+
+    **Example:**
+    ```bash
+    ward scan /path/to/my-laravel-app
+    ward scan ./my-app
+    ```
+  </Tab>
+  <Tab title="Git Provider">
+    **Source:** `internal/provider/git.go`
+
+    Clones a remote Git repository for scanning.
+
+    **What it does:**
+    - Detects Git URLs (https://, git@, ssh://)
+    - Performs a **shallow clone** (depth=1 by default) to save time and bandwidth
+    - Creates a temporary directory that's cleaned up after scanning
+    - Supports custom clone depth via `config.yaml`
+
+    **Example:**
+    ```bash
+    ward scan https://github.com/user/laravel-project.git
+    ```
+
+    **Configuration:**
+    ```yaml
+    providers:
+      git_depth: 1  # 0 = full history
+    ```
+  </Tab>
+</Tabs>
+
+### Laravel Detection
+
+The provider checks if the project appears to be Laravel by looking for:
+- `composer.json` file
+- `artisan` CLI script
+- `app/`, `config/`, or `routes/` directories
+
+If these aren't found, Ward emits a warning but continues scanning.
+
+### Events Published
+
+<CodeGroup>
+```go Stage Start
+EventStageStarted {
+    Stage: StageProvider
+}
+```
+
+```go Stage Complete
+EventStageCompleted {
+    Stage: StageProvider
+}
+```
+
+```go Log Messages
+EventLogMessage {
+    Level: "info",
+    Message: "Cloning https://github.com/user/repo.git ..."
+}
+```
+</CodeGroup>
+
+<Note>
+  The Provider automatically cleans up temporary directories (for Git clones) after the scan completes, even if there's an error.
+</Note>
+
+---
+
+## Stage 2: Resolvers
+
+**Purpose:** Parse Laravel project files to build a structured `ProjectContext` that all scanners can consume.
+
+Resolvers run in priority order and populate different fields of the shared context.
+
+### Resolver Execution
+
+**Source:** `orchestrator.go:108-133`
+
+```go
+pc := &models.ProjectContext{}
+resolvers := []resolver.ContextResolver{
+    resolver.NewFrameworkResolver(),
+    resolver.NewPackageResolver(),
+}
+
+for _, r := range resolvers {
+    if err := r.Resolve(ctx, result.RootPath, pc); err != nil {
+        // Log error but continue — partial context is still useful
+    }
+}
+```
+
+### Resolver Types
+
+<Tabs>
+  <Tab title="Framework Resolver">
+    **Source:** `internal/resolver/framework.go`
+    
+    **Priority:** 10 (runs first)
+
+    **What it parses:**
+    - `composer.json` → Laravel version, PHP version, project name
+    - `.env` → Environment variables (APP_DEBUG, APP_ENV, DB_PASSWORD, etc.)
+
+    **Context fields populated:**
+    ```go
+    ProjectContext{
+        LaravelVersion: "10.x",
+        PHPVersion:     "8.2",
+        ProjectName:   "my-app",
+        FrameworkType: "laravel",
+        ComposerDeps:  map[string]string{"laravel/framework": "^10.0"},
+        EnvVariables:  map[string]string{"APP_DEBUG": "false"},
+    }
+    ```
+  </Tab>
+  <Tab title="Package Resolver">
+    **Source:** `internal/resolver/package.go`
+    
+    **Priority:** 20 (runs after Framework)
+
+    **What it parses:**
+    - `composer.lock` → Installed packages with exact resolved versions
+
+    **Context fields populated:**
+    ```go
+    ProjectContext{
+        InstalledPackages: map[string]string{
+            "laravel/framework": "10.48.4",
+            "guzzlehttp/guzzle": "7.5.0",
+            "symfony/console":  "6.4.3",
+            // ... all packages from composer.lock
+        },
+    }
+    ```
+
+    This data is used by the dependency scanner for CVE checks.
+  </Tab>
+</Tabs>
+
+### Project Context Structure
+
+**Source:** `internal/models/context.go`
+
+```go
+type ProjectContext struct {
+    RootPath          string            // Absolute path to project root
+    LaravelVersion    string            // e.g., "10.x"
+    PHPVersion        string            // e.g., "8.2"
+    ProjectName       string            // From composer.json name
+    FrameworkType     string            // "laravel"
+    ComposerDeps      map[string]string // composer.json require
+    InstalledPackages map[string]string // composer.lock resolved versions
+    EnvVariables      map[string]string // Parsed from .env
+    ConfigFiles       []string          // List of config/*.php files
+}
+```
+
+### Events Published
+
+<CodeGroup>
+```go Context Resolved
+EventContextResolved {
+    ProjectName:    "my-app",
+    LaravelVersion: "10.x",
+    PHPVersion:     "8.2",
+    FrameworkType:  "laravel",
+    PackageCount:   87,
+}
+```
+</CodeGroup>
+
+<Tip>
+  Resolvers are designed to fail gracefully. If a file is missing or malformed, the resolver logs an error but continues. Scanners that depend on that data will simply skip related checks.
+</Tip>
+
+---
+
+## Stage 3: Scanners
+
+**Purpose:** Run independent security checks against the resolved project context.
+
+All scanners execute with the shared `ProjectContext` but operate independently. If one scanner fails, others continue.
+
+### Scanner Registration
+
+**Source:** `orchestrator.go:52-73`
+
+```go
+scanners := []models.Scanner{
+    envscanner.New(),
+    configscanner.New(),
+    depscanner.New(),
+}
+
+// Load custom YAML rules
+customRules, err := config.LoadAllRules(o.cfg)
+if len(customRules) > 0 {
+    scanners = append(scanners, rulesscanner.New(customRules))
+}
+
+// Filter disabled scanners
+scanners = o.filterScanners(scanners)
+```
+
+### Scanner Execution
+
+**Source:** `orchestrator.go:136-186`
+
+Each scanner:
+1. Publishes `EventScannerStarted`
+2. Receives the `ProjectContext` and an `emit` callback
+3. Performs its security checks
+4. Emits findings in real-time via callback
+5. Returns all findings as a slice
+6. Publishes `EventScannerCompleted` with finding count
+
+```go
+emit := func(f models.Finding) {
+    o.bus.Publish(eventbus.NewEvent(eventbus.EventFindingDiscovered, f))
+}
+
+findings, err := scanner.Scan(ctx, projectContext, emit)
+```
+
+### Built-in Scanners
+
+<CardGroup cols={2}>
+  <Card title="env-scanner" icon="file-lines">
+    **Source:** `internal/scanner/env/scanner.go`
+    
+    8 checks for `.env` misconfigurations:
+    - Missing `.env` file
+    - `APP_DEBUG=true`
+    - Empty/weak `APP_KEY`
+    - Non-production `APP_ENV`
+    - Empty `DB_PASSWORD`
+    - File sessions in production
+    - Real credentials in `.env.example`
+  </Card>
+  <Card title="config-scanner" icon="gear">
+    **Source:** `internal/scanner/configscan/scanner.go`
+    
+    13 checks for `config/*.php` security issues:
+    - Hardcoded debug mode
+    - Weak encryption cipher
+    - Missing cookie security flags
+    - CORS wildcards
+    - Hardcoded credentials in config
+    - Long session/token lifetimes
+  </Card>
+  <Card title="dependency-scanner" icon="box">
+    **Source:** `internal/scanner/dependency/scanner.go`
+    
+    Live CVE database lookup via OSV.dev:
+    - Queries for all packages in `composer.lock`
+    - Batch requests for performance
+    - Returns CVE ID, severity, affected versions
+    - Includes remediation with fixed version
+  </Card>
+  <Card title="rules-scanner" icon="list-check">
+    **Source:** `internal/scanner/rules/scanner.go`
+    
+    40 default YAML pattern rules:
+    - Secrets (7 rules)
+    - Injection (6 rules)
+    - XSS (4 rules)
+    - Debug artifacts (6 rules)
+    - Weak crypto (5 rules)
+    - Security config (7 rules)
+    - Auth issues (5 rules)
+  </Card>
+</CardGroup>
+
+### Scanner Interface
+
+**Source:** `internal/models/scanner.go`
+
+All scanners implement:
+
+```go
+type Scanner interface {
+    Name() string
+    Description() string
+    Scan(ctx context.Context, project ProjectContext, emit func(Finding)) ([]Finding, error)
+}
+```
+
+<Tip>
+  The `emit` callback allows scanners to stream findings in real-time. This enables the TUI to show live updates as vulnerabilities are discovered.
+</Tip>
+
+### Scanner Configuration
+
+You can disable scanners in `~/.ward/config.yaml`:
+
+```yaml
+scanners:
+  disable:
+    - dependency-scanner  # Skip CVE checks
+    - rules-scanner       # Skip YAML rules
+```
+
+### Events Published
+
+<CodeGroup>
+```go Scanner Registered
+EventScannerRegistered {
+    Name:        "env-scanner",
+    Description: "Environment file security checks",
+}
+```
+
+```go Scanner Started
+EventScannerStarted {
+    Name: "env-scanner",
+}
+```
+
+```go Finding Discovered
+EventFindingDiscovered {
+    Finding: {
+        ID:          "ENV-002",
+        Title:       "APP_DEBUG is enabled",
+        Severity:    High,
+        Category:    "Configuration",
+        File:        ".env",
+        Line:        5,
+        // ...
+    },
+}
+```
+
+```go Scanner Completed
+EventScannerCompleted {
+    Name:         "env-scanner",
+    FindingCount: 3,
+}
+```
+
+```go Scanner Failed
+EventScannerFailed {
+    Name:  "dependency-scanner",
+    Error: "network timeout",
+}
+```
+</CodeGroup>
+
+---
+
+## Stage 4: Post-Process
+
+**Purpose:** Clean, filter, and enrich scan results before reporting.
+
+The Post-Process stage applies several transformations to the raw findings:
+
+### Processing Steps
+
+**Source:** `orchestrator.go:188-204`
+
+<Steps>
+  <Step title="Deduplication">
+    Remove duplicate findings using a composite key:
+    ```go
+    key := finding.ID + "|" + finding.File + "|" + fmt.Sprintf("%d", finding.Line)
+    ```
+
+    This ensures the same issue at the same location is only reported once, even if multiple scanners detect it.
+  </Step>
+  <Step title="Severity Filtering">
+    Filter findings based on the minimum severity threshold from config:
+    ```yaml
+    severity: medium  # Only show medium, high, critical
+    ```
+
+    Findings below the threshold are silently discarded.
+  </Step>
+  <Step title="Baseline Comparison">
+    If a baseline file is provided (`--baseline .ward-baseline.json`), suppress known findings:
+    ```go
+    if o.baseline != nil {
+        allFindings, suppressed = o.baseline.Filter(allFindings)
+    }
+    ```
+
+    This shows only **new** findings introduced since the baseline was created.
+  </Step>
+  <Step title="History Diff">
+    Compare with the last scan to show what changed:
+    ```go
+    diff, _ := store.CompareLast(report)
+    // "vs last scan: 2 new, 3 resolved (12→11)"
+    ```
+
+    This helps track security posture over time.
+  </Step>
+</Steps>
+
+### Events Published
+
+<CodeGroup>
+```go Stage Events
+EventStageStarted { Stage: StagePostProcess }
+EventStageCompleted { Stage: StagePostProcess }
+```
+
+```go Baseline Suppression
+EventLogMessage {
+    Level:   "info",
+    Message: "4 findings suppressed by baseline",
+}
+```
+
+```go History Comparison
+EventLogMessage {
+    Level:   "info",
+    Message: "vs last scan: 2 new, 3 resolved (12→11)",
+}
+```
+</CodeGroup>
+
+---
+
+## Stage 5: Report
+
+**Purpose:** Generate output files in configured formats and save scan history.
+
+### Report Generation
+
+**Source:** `orchestrator.go:206-250`
+
+Ward creates a `ScanReport` containing:
+- Project metadata from context
+- All findings (after post-processing)
+- Scan timestamps and duration
+- Scanner execution status
+- Any scanner errors
+
+```go
+report := &models.ScanReport{
+    ProjectContext: *pc,
+    Findings:       allFindings,
+    StartedAt:      startTime,
+    CompletedAt:    endTime,
+    Duration:       endTime.Sub(startTime),
+    ScannersRun:    ["env-scanner", "config-scanner", ...],
+    ScannerErrors:  map[string]string{},
+}
+```
+
+### Report Formats
+
+Reporters are selected based on `config.yaml`:
+
+```yaml
+output:
+  formats:
+    - json       # Always generated (baseline)
+    - sarif      # GitHub Code Scanning
+    - html       # Visual standalone report
+    - markdown   # PR-friendly text format
+  dir: ./reports
+```
+
+<Tabs>
+  <Tab title="JSON">
+    **Source:** `internal/reporter/json.go`
+    
+    Machine-readable format containing the full `ScanReport` structure.
+    
+    **Output:** `ward-report.json`
+    
+    **Always generated** as a baseline, even if not in the formats list.
+  </Tab>
+  <Tab title="SARIF">
+    **Source:** `internal/reporter/sarif.go`
+    
+    [SARIF 2.1.0](https://sarifweb.azurewebsites.net/) format for IDE and GitHub Code Scanning integration.
+    
+    **Output:** `ward-report.sarif`
+    
+    Upload to GitHub:
+    ```yaml
+    - uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ward-report.sarif
+    ```
+  </Tab>
+  <Tab title="HTML">
+    **Source:** `internal/reporter/html.go`
+    
+    Standalone HTML report with dark theme, sortable tables, and code snippets.
+    
+    **Output:** `ward-report.html`
+  </Tab>
+  <Tab title="Markdown">
+    **Source:** `internal/reporter/markdown.go`
+    
+    Text-based report perfect for PR comments and terminal viewing.
+    
+    **Output:** `ward-report.md`
+  </Tab>
+</Tabs>
+
+### Scan History
+
+Ward automatically saves each scan to `~/.ward/store/` for historical comparison:
+
+**Source:** `internal/store/store.go`
+
+```go
+if _, err := store.Save(report); err != nil {
+    // Log warning but don't fail the scan
+}
+```
+
+Future scans of the same project will diff against this history.
+
+### Baseline Updates
+
+If `--update-baseline` is provided, save current findings as the new baseline:
+
+```go
+if o.baselinePath != "" {
+    baseline.Save(o.baselinePath, allFindings)
+}
+```
+
+### Events Published
+
+<CodeGroup>
+```go Report Generated
+EventLogMessage {
+    Level:   "info",
+    Message: "Report written to ward-report.json",
+}
+```
+
+```go Scan Completed
+EventScanCompleted {
+    Report: &ScanReport{ /* full report */ },
+}
+```
+</CodeGroup>
+
+---
+
+## Pipeline Error Handling
+
+Ward uses graceful error handling throughout the pipeline:
+
+<AccordionGroup>
+  <Accordion title="Provider Errors">
+    **Fatal** — If the provider fails (path doesn't exist, git clone fails), the scan stops immediately.
+
+    ```go
+    if err := src.Acquire(ctx, target); err != nil {
+        return o.fail(fmt.Errorf("provider: %w", err))
+    }
+    ```
+  </Accordion>
+  <Accordion title="Resolver Errors">
+    **Non-fatal** — If a resolver fails (missing file, parse error), Ward logs an error but continues.
+
+    Scanners that depend on that data will skip related checks.
+  </Accordion>
+  <Accordion title="Scanner Errors">
+    **Non-fatal** — If a scanner fails, Ward records the error but continues with other scanners.
+
+    The error is included in the final report's `ScannerErrors` map.
+  </Accordion>
+  <Accordion title="Reporter Errors">
+    **Non-fatal** — If a reporter fails, Ward logs an error but continues with other formats.
+
+    At least JSON is always attempted.
+  </Accordion>
+</AccordionGroup>
+
+## Performance Characteristics
+
+<CardGroup cols={2}>
+  <Card title="Parallel Scanning" icon="gauge-high">
+    Scanners could run in parallel (not currently implemented), as they're fully independent and share an immutable context.
+  </Card>
+  <Card title="Shallow Clones" icon="code-branch">
+    Git provider uses `--depth=1` by default, significantly reducing clone time for large repositories.
+  </Card>
+  <Card title="Batch CVE Queries" icon="layer-group">
+    Dependency scanner sends packages to OSV.dev in batches of 100 for optimal API performance.
+  </Card>
+  <Card title="Event Streaming" icon="stream">
+    The `emit` callback allows real-time finding updates without waiting for scanner completion.
+  </Card>
+</CardGroup>
+
+## Related Pages
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="diagram-project" href="/concepts/architecture">
+    System architecture and design principles
+  </Card>
+  <Card title="Security Scanners" icon="shield-halved" href="/concepts/security-scanners">
+    Deep dive into each scanner's checks
+  </Card>
+</CardGroup>

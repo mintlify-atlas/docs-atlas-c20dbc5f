@@ -1,0 +1,165 @@
+---
+title: Environment scanner
+description: Detects security misconfigurations in .env files
+---
+
+The environment scanner examines `.env` and `.env.example` files for common security issues that could expose your Laravel application to vulnerabilities in production.
+
+## What it checks
+
+The env-scanner performs 8 distinct security checks:
+
+| Check ID | Issue | Severity | Description |
+|----------|-------|----------|-------------|
+| ENV-001 | No .env file found | Info | Application is missing an .env file. May be intentional in containerized deployments. |
+| ENV-002 | APP_DEBUG enabled | High | `APP_DEBUG=true` exposes detailed error messages, stack traces, database queries, and environment variables to end users. |
+| ENV-003 | Empty or missing APP_KEY | Critical | The application encryption key is not set. Laravel cannot encrypt cookies, sessions, and other sensitive data without it. |
+| ENV-004 | Weak or default APP_KEY | Critical | The APP_KEY appears to be a default or placeholder value, making all encrypted data predictable and breakable. |
+| ENV-005 | Non-production APP_ENV | Medium | APP_ENV is set to `local`, `development`, or `dev`, suggesting a non-production configuration on what may be a production server. |
+| ENV-006 | Empty database password | Low | DB_PASSWORD is set to an empty string. Valid for local development but a security risk in production. |
+| ENV-007 | File sessions in production | Low | SESSION_DRIVER is set to `file` in a production environment. File sessions don't scale across multiple servers. |
+| ENV-008 | Real credentials in .env.example | Medium | The .env.example file contains values that don't look like placeholders. This file is typically committed to version control. |
+
+## Implementation details
+
+Extracted from `internal/scanner/env/scanner.go`:
+
+### APP_DEBUG check
+
+```go
+// scanner.go:42-59
+if val, ok := envVars["APP_DEBUG"]; ok && strings.EqualFold(val, "true") {
+    f := models.Finding{
+        ID:          "ENV-002",
+        Title:       "APP_DEBUG is enabled",
+        Description: "APP_DEBUG is set to true. In production, this exposes detailed error messages...",
+        Severity:    models.SeverityHigh,
+        Category:    "Configuration",
+        File:        ".env",
+        Remediation: "Set APP_DEBUG=false in your production .env file.",
+        References:  []string{"https://owasp.org/Top10/A05_2021-Security_Misconfiguration/"},
+    }
+}
+```
+
+### APP_KEY validation
+
+The scanner checks for weak keys using these heuristics:
+
+```go
+// scanner.go:268-282
+func isWeakKey(val string) bool {
+    lower := strings.ToLower(val)
+    // All zeros/A's base64 key
+    if strings.HasPrefix(lower, "base64:aaaaaaa") {
+        return true
+    }
+    // Common test keys
+    if lower == "somerandostrng" || lower == "somerandomstring" {
+        return true
+    }
+    // Too short after base64: prefix
+    if strings.HasPrefix(val, "base64:") && len(val) < 20 {
+        return true
+    }
+    return false
+}
+```
+
+### .env.example credential detection
+
+The scanner looks for real-looking credentials in `.env.example`:
+
+```go
+// scanner.go:189-201
+sensitiveKeys := []string{"DB_PASSWORD", "MAIL_PASSWORD", "AWS_SECRET_ACCESS_KEY", "REDIS_PASSWORD", "PUSHER_APP_SECRET"}
+
+for _, key := range sensitiveKeys {
+    val, ok := vars[key]
+    // Skip obvious placeholders
+    lower := strings.ToLower(val)
+    if lower == "null" || lower == "secret" || lower == "password" || lower == "your_password_here" || lower == "changeme" {
+        continue
+    }
+    // If it's longer than 6 chars and not a placeholder, flag it
+    if len(val) > 6 {
+        // Create ENV-008 finding
+    }
+}
+```
+
+## Example findings
+
+<CodeGroup>
+```json TUI Output
+[HIGH] APP_DEBUG is enabled
+File: .env:2
+APP_DEBUG=true
+
+In production, this exposes detailed error messages including stack traces,
+database queries, and environment variables to end users.
+```
+
+```json JSON Report
+{
+  "id": "ENV-002",
+  "title": "APP_DEBUG is enabled",
+  "severity": "high",
+  "category": "Configuration",
+  "file": ".env",
+  "line": 2,
+  "code_snippet": "APP_DEBUG=true",
+  "remediation": "Set APP_DEBUG=false in your production .env file. Use Laravel's logging system for error tracking instead.",
+  "references": ["https://owasp.org/Top10/A05_2021-Security_Misconfiguration/"]
+}
+```
+</CodeGroup>
+
+## Remediation examples
+
+### Fix APP_DEBUG
+
+```bash .env
+# Bad
+APP_DEBUG=true
+
+# Good
+APP_DEBUG=false
+```
+
+### Generate APP_KEY
+
+```bash Terminal
+php artisan key:generate
+```
+
+This command generates a secure 32-character random key and updates your `.env` file automatically.
+
+### Fix session configuration
+
+```bash .env
+# Bad - file sessions in production
+SESSION_DRIVER=file
+
+# Good - use Redis or database for production
+SESSION_DRIVER=redis
+REDIS_HOST=127.0.0.1
+REDIS_PASSWORD=your_redis_password
+```
+
+## Disabling checks
+
+To disable specific environment checks, add them to your `~/.ward/config.yaml`:
+
+```yaml
+rules:
+  disable:
+    - ENV-006  # Allow empty DB_PASSWORD for local dev
+    - ENV-007  # Allow file sessions
+```
+
+## Related documentation
+
+- [Configuration scanner](/scanners/config-scanner) - Checks config/*.php files
+- [Custom rules](/configuration/custom-rules) - Write your own .env checks
+- [Rule overrides](/configuration/rule-overrides) - Change severity levels

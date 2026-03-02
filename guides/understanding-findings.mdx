@@ -1,0 +1,633 @@
+---
+title: Understanding Findings
+description: Learn how to interpret Ward scan results, severity levels, and finding details
+---
+
+Ward reports security findings across multiple formats. Understanding the structure of findings, severity levels, and scan history helps you prioritize remediation and track security posture over time.
+
+## Finding Structure
+
+Every security finding includes the following fields:
+
+| Field | Description |
+|-------|-------------|
+| **ID** | Unique rule identifier (e.g., `ENV-002`, `SECRET-001`, `INJECT-003`) |
+| **Title** | Short, descriptive title summarizing the issue |
+| **Description** | Detailed explanation of what was detected and why it's a security concern |
+| **Severity** | Risk level: Info, Low, Medium, High, or Critical |
+| **Category** | Grouping category (e.g., Secrets, Injection, XSS, Debug, Configuration) |
+| **Scanner** | Which scanner detected the finding (e.g., `env-scanner`, `rules-scanner`) |
+| **File** | Relative path to the file containing the issue |
+| **Line** | Line number where the issue was detected |
+| **Code Snippet** | Excerpt of code showing the problematic pattern |
+| **Remediation** | Actionable guidance on how to fix the issue |
+| **References** | Links to documentation, CWE entries, or OWASP guidelines |
+
+### Example Finding (JSON)
+
+```json
+{
+  "id": "ENV-002",
+  "title": "APP_DEBUG=true in production",
+  "description": "APP_DEBUG is set to true. This exposes detailed error messages, stack traces, and application internals to end users. In production, this leaks sensitive information and aids attackers.",
+  "severity": "High",
+  "category": "Environment",
+  "scanner": "env-scanner",
+  "file": ".env",
+  "line": 3,
+  "code_snippet": "APP_DEBUG=true",
+  "remediation": "Set APP_DEBUG=false in .env for production environments:\n  APP_DEBUG=false",
+  "references": [
+    "https://laravel.com/docs/configuration#debug-mode",
+    "https://owasp.org/www-community/Improper_Error_Handling"
+  ]
+}
+```
+
+## Severity Levels
+
+Ward uses five severity levels to indicate the risk and urgency of findings.
+
+### Critical
+
+**Immediate security vulnerabilities** that allow attackers to compromise the application, access sensitive data, or execute arbitrary code.
+
+**Examples:**
+- Empty or missing `APP_KEY` (allows session forgery)
+- `eval()` usage (remote code execution)
+- AWS credentials hardcoded in source
+- Private keys embedded in PHP files
+
+**Action:** Fix immediately. These issues should block deployments.
+
+**Exit codes:** Use `--fail-on critical` in CI to fail builds on Critical findings.
+
+### High
+
+**Serious security risks** that expose sensitive data, enable injection attacks, or bypass authentication/authorization.
+
+**Examples:**
+- `APP_DEBUG=true` in production (information disclosure)
+- Hardcoded passwords or API keys
+- SQL injection via `DB::raw()` with variables
+- Shell command execution without sanitization
+
+**Action:** Prioritize for remediation. Fix within the current sprint.
+
+**Exit codes:** Use `--fail-on high` to fail on both High and Critical findings.
+
+### Medium
+
+**Moderate security concerns** that may not be directly exploitable but increase attack surface or violate security best practices.
+
+**Examples:**
+- Non-production `APP_ENV` (e.g., `local`, `dev`)
+- Real credentials in `.env.example`
+- Unescaped Blade output (potential XSS)
+- Missing CSRF directive in forms
+
+**Action:** Address in upcoming sprints. Track as technical debt.
+
+**Exit codes:** Use `--fail-on medium` to fail on Medium, High, and Critical findings.
+
+### Low
+
+**Minor security issues** or deviations from best practices with limited direct risk.
+
+**Examples:**
+- Empty `DB_PASSWORD` (may be intentional for local dev)
+- File-based sessions in production (not ideal but not inherently insecure)
+- Weak cryptographic functions for non-sensitive data
+
+**Action:** Fix when convenient. Document as known issues if acceptable.
+
+**Exit codes:** Use `--fail-on low` to fail on any finding except Info.
+
+### Info
+
+**Informational findings** that don't represent vulnerabilities but provide context about the project's configuration.
+
+**Examples:**
+- Missing `.env` file (may be expected in some environments)
+- Scan summary information
+- Configuration recommendations
+
+**Action:** Review and document. No immediate action required.
+
+**Exit codes:** Use `--fail-on info` to fail on any finding at all (very strict).
+
+## Severity Comparison
+
+From `internal/models/severity.go`, severities are ordered numerically:
+
+```go
+const (
+    SeverityInfo     Severity = 0
+    SeverityLow      Severity = 1
+    SeverityMedium   Severity = 2
+    SeverityHigh     Severity = 3
+    SeverityCritical Severity = 4
+)
+```
+
+When using `--fail-on <severity>`, Ward exits with code 1 if **any** finding has a severity **greater than or equal to** the threshold:
+
+- `--fail-on info` → Fails on Info, Low, Medium, High, Critical (everything)
+- `--fail-on low` → Fails on Low, Medium, High, Critical
+- `--fail-on medium` → Fails on Medium, High, Critical
+- `--fail-on high` → Fails on High, Critical
+- `--fail-on critical` → Fails on Critical only
+
+## Reading the TUI
+
+Ward's Terminal UI (TUI) displays scan progress and results in an interactive interface.
+
+### Scan View
+
+Shown while the scan is running:
+
+```
+╭─ Ward Security Scan ────────────────────────────────────────╮
+│                                                              │
+│  Provider ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100%  │
+│  Resolvers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100%  │
+│  Scanners ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  50%  │
+│                                                              │
+│  ● env-scanner          ✓ 8 findings                        │
+│  ● config-scanner       ◌ running...                        │
+│  ● dependency-scanner   ⏸ waiting                           │
+│  ● rules-scanner        ⏸ waiting                           │
+│                                                              │
+│  Critical: 1  High: 2  Medium: 3  Low: 1  Info: 1           │
+│                                                              │
+│  [info] Scanning .env                                       │
+│  [info] Scanning config/app.php                             │
+│  [warn] Found ENV-002: APP_DEBUG=true                       │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+```
+
+**Components:**
+- **Stage Progress:** Shows which pipeline stage is active (Provider, Resolvers, Scanners, Post-Process, Report)
+- **Scanner Panel:** Lists all scanners with status indicators:
+  - `●` (colored) = running
+  - `✓` = completed
+  - `⏸` = waiting
+- **Live Stats:** Real-time counts of findings by severity
+- **Event Log:** Scrollable log of scanner activity and findings
+
+### Results View
+
+Shown after the scan completes:
+
+```
+╭─ Scan Results ──────────────────────────────────────────────╮
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │ Severity  │ ID        │ Title                        │  │
+│  ├───────────┼───────────┼──────────────────────────────┤  │
+│  │ Critical  │ ENV-003   │ Empty or missing APP_KEY     │  │
+│  │ High      │ ENV-002   │ APP_DEBUG=true               │  │
+│  │ High      │ SECRET-001│ Hardcoded password           │  │
+│  │ Medium    │ ENV-005   │ Non-production APP_ENV       │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌─ Finding Detail ────────────────────────────────────┐  │
+│  │ ENV-003: Empty or missing APP_KEY                    │  │
+│  │                                                        │  │
+│  │ The APP_KEY is empty or not set. Laravel uses this   │  │
+│  │ key to encrypt session data and cookies. Without a   │  │
+│  │ valid key, sessions can be forged.                   │  │
+│  │                                                        │  │
+│  │ File: .env:12                                         │  │
+│  │ Code: APP_KEY=                                        │  │
+│  │                                                        │  │
+│  │ Remediation:                                          │  │
+│  │ Generate a key with:                                  │  │
+│  │   php artisan key:generate                           │  │
+│  └────────────────────────────────────────────────────────┘  │
+│                                                              │
+│  j/k: navigate  s: sort  Tab: switch panel  q: quit         │
+╰──────────────────────────────────────────────────────────────╯
+```
+
+**Components:**
+- **Findings Table:** Sortable list of all findings with severity badges
+- **Detail Panel:** Shows full information for the selected finding
+- **Keyboard Shortcuts:** Navigation and view controls
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` / `↓` / `↑` | Navigate findings |
+| `s` | Cycle sort order (severity → category → file) |
+| `Tab` | Switch between panels |
+| `?` | Toggle help |
+| `q` / `Ctrl+C` | Quit |
+| `Esc` | Return to scan view (from results) |
+
+## Reading Report Formats
+
+Ward generates reports in multiple formats. Each format is suited for different use cases.
+
+### JSON Report
+
+**Use case:** Machine parsing, CI/CD integration, custom tooling
+
+**Location:** `ward-report.json` (or configured output directory)
+
+**Structure:**
+
+```json
+{
+  "project_context": {
+    "project_name": "my-laravel-app",
+    "root_path": "/path/to/project",
+    "framework_version": "11.0.0",
+    "php_version": "8.3.0"
+  },
+  "findings": [
+    {
+      "id": "ENV-002",
+      "title": "APP_DEBUG=true in production",
+      "severity": "High",
+      "category": "Environment",
+      "file": ".env",
+      "line": 3,
+      "code_snippet": "APP_DEBUG=true",
+      "remediation": "Set APP_DEBUG=false...",
+      "references": ["..."]
+    }
+  ],
+  "started_at": "2026-03-02T10:15:30Z",
+  "completed_at": "2026-03-02T10:15:35Z",
+  "duration": "5.2s",
+  "scanners_run": ["env-scanner", "config-scanner", "dependency-scanner", "rules-scanner"],
+  "scanner_errors": {}
+}
+```
+
+### SARIF Report
+
+**Use case:** GitHub Code Scanning, IDE integration, SAST tools
+
+**Location:** `ward-report.sarif`
+
+**Format:** [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) standard
+
+**Upload to GitHub:**
+
+```yaml
+- name: Upload SARIF
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: ward-report.sarif
+```
+
+Findings appear in the **Security** tab of your repository and as annotations on pull requests.
+
+### HTML Report
+
+**Use case:** Standalone visual report for stakeholders
+
+**Location:** `ward-report.html`
+
+**Features:**
+- Dark theme with syntax highlighting
+- Sortable/filterable findings table
+- Grouped by severity and category
+- Code snippets with line numbers
+- Fully self-contained (no external dependencies)
+
+Open in any browser:
+
+```bash
+open ward-report.html
+```
+
+### Markdown Report
+
+**Use case:** Pull request comments, Slack/Discord notifications, documentation
+
+**Location:** `ward-report.md`
+
+**Format:** GitHub-flavored Markdown
+
+**Example:**
+
+```markdown
+# Ward Security Scan Report
+
+**Project:** my-laravel-app  
+**Completed:** 2026-03-02 10:15:35  
+**Duration:** 5.2s
+
+## Summary
+
+- **Critical:** 1
+- **High:** 2
+- **Medium:** 3
+- **Low:** 1
+- **Info:** 1
+
+## Findings
+
+### Critical
+
+#### ENV-003: Empty or missing APP_KEY
+
+**File:** `.env:12`  
+**Category:** Environment
+
+The APP_KEY is empty or not set. Laravel uses this key to encrypt session data and cookies.
+
+**Remediation:**
+```bash
+php artisan key:generate
+```
+```
+
+Post to pull requests using GitHub Actions:
+
+```yaml
+- name: Comment PR with findings
+  uses: actions/github-script@v6
+  with:
+    script: |
+      const fs = require('fs');
+      const report = fs.readFileSync('ward-report.md', 'utf8');
+      github.rest.issues.createComment({
+        issue_number: context.issue.number,
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        body: report
+      });
+```
+
+## Scan History and Diffs
+
+Ward automatically saves each scan to `~/.ward/store/` and shows what changed compared to the last scan.
+
+### Viewing Scan History
+
+Ward compares the current scan against the most recent scan of the same project. From `internal/store/store.go`:
+
+```go
+// CompareLast diffs the current scan against the most recent stored scan
+func CompareLast(report *models.ScanReport) (*Diff, error) {
+    last, err := LastRecord(report.ProjectContext.RootPath)
+    // ... compares finding IDs to detect new/resolved issues
+}
+```
+
+### Diff Output
+
+After a scan, Ward shows:
+
+```
+[info] vs last scan: 2 new, 3 resolved (15→14)
+```
+
+**Interpretation:**
+- `2 new` — Two findings appeared since the last scan
+- `3 resolved` — Three findings from the last scan are no longer present
+- `15→14` — Total findings decreased from 15 to 14
+
+### Finding IDs and Fingerprints
+
+Ward tracks findings across scans using **fingerprints**—stable hashes of the finding's rule ID, file path, and line number. From `internal/models/finding.go`:
+
+```go
+func (f Finding) Fingerprint() string {
+    h := sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%d", f.ID, f.File, f.Line)))
+    return fmt.Sprintf("%x", h[:12]) // 24-char hex
+}
+```
+
+**Why fingerprints matter:**
+- Findings persist even if descriptions or remediation text changes
+- Moving code to a different line creates a **new** finding (old one marked resolved)
+- Renaming a file creates a **new** finding
+
+### Stored Scan Records
+
+Each scan is saved as a JSON file in `~/.ward/store/`:
+
+```
+~/.ward/store/
+├── 2026-03-01T14-30-00_my-laravel-app.json
+├── 2026-03-02T09-15-00_my-laravel-app.json
+└── 2026-03-02T10-15-00_my-laravel-app.json
+```
+
+**Record structure:**
+
+```json
+{
+  "id": "a3f7b2e1c4d5",
+  "project_name": "my-laravel-app",
+  "project_path": "/path/to/project",
+  "timestamp": "2026-03-02T10:15:35Z",
+  "duration": "5.2s",
+  "finding_count": 14,
+  "by_severity": {
+    "Critical": 1,
+    "High": 2,
+    "Medium": 5,
+    "Low": 4,
+    "Info": 2
+  },
+  "scanners_run": ["env-scanner", "config-scanner", "dependency-scanner", "rules-scanner"],
+  "finding_ids": [
+    "ENV-002|.env|3",
+    "ENV-003|.env|12",
+    "SECRET-001|app/Http/Controllers/PaymentController.php|45"
+  ]
+}
+```
+
+### Tracking Security Posture Over Time
+
+Use scan history to track remediation progress:
+
+```bash
+# Week 1: 50 findings
+ward scan .
+
+# Week 2: 40 findings (10 resolved)
+# Output: [info] vs last scan: 0 new, 10 resolved (50→40)
+ward scan .
+
+# Week 3: 42 findings (2 new, 0 resolved)
+# Output: [info] vs last scan: 2 new, 0 resolved (40→42)
+ward scan .
+```
+
+## Finding Categories
+
+Ward groups findings into categories for easier navigation and remediation planning.
+
+### Built-in Categories
+
+| Category | Description | Example Rules |
+|----------|-------------|---------------|
+| **Secrets** | Hardcoded credentials, API keys, tokens | `SECRET-001`, `SECRET-003`, `SECRET-005` |
+| **Injection** | SQL injection, command injection, code injection | `INJECT-001`, `INJECT-003`, `INJECT-004` |
+| **XSS** | Cross-site scripting vulnerabilities | `XSS-001`, `XSS-002` |
+| **Debug** | Debug artifacts left in production code | `DEBUG-001`, `DEBUG-002`, `DEBUG-006` |
+| **Crypto** | Weak cryptographic functions | `CRYPTO-001`, `CRYPTO-002`, `CRYPTO-005` |
+| **Configuration** | Insecure configuration settings | `CONFIG-001`, `CONFIG-007` |
+| **Authentication** | Missing or weak authentication checks | `AUTH-001`, `AUTH-003`, `AUTH-005` |
+| **Environment** | `.env` misconfigurations | `ENV-002`, `ENV-003`, `ENV-005` |
+| **Dependencies** | Vulnerable Composer packages | Varies (CVE-based) |
+
+### Viewing by Category
+
+In the TUI results view, press `s` to cycle sort order. One of the sort modes groups findings by category:
+
+```
+┌─────────────────────────────────────────────────┐
+│ Secrets (3)                                     │
+│   SECRET-001 - Hardcoded password               │
+│   SECRET-003 - AWS credentials                  │
+│   SECRET-005 - JWT secret                       │
+│                                                  │
+│ Injection (2)                                   │
+│   INJECT-001 - DB::raw() with interpolation     │
+│   INJECT-003 - Shell command execution          │
+└─────────────────────────────────────────────────┘
+```
+
+JSON reports include the `category` field for programmatic grouping:
+
+```json
+{
+  "findings": [
+    {"category": "Secrets", "id": "SECRET-001", ...},
+    {"category": "Secrets", "id": "SECRET-003", ...},
+    {"category": "Injection", "id": "INJECT-001", ...}
+  ]
+}
+```
+
+## Interpreting Scanner Output
+
+Ward runs four types of scanners. Understanding each scanner's focus helps prioritize remediation.
+
+### env-scanner
+
+**What it checks:** `.env` file misconfigurations
+
+**Findings:**
+- `ENV-001` — Missing `.env` file
+- `ENV-002` — `APP_DEBUG=true`
+- `ENV-003` — Empty or missing `APP_KEY`
+- `ENV-004` — Weak/default `APP_KEY`
+- `ENV-005` — Non-production `APP_ENV`
+- `ENV-006` — Empty `DB_PASSWORD`
+- `ENV-007` — File sessions in production
+- `ENV-008` — Real credentials in `.env.example`
+
+**Priority:** Fix Critical (`ENV-003`, `ENV-004`) and High (`ENV-002`) findings first.
+
+### config-scanner
+
+**What it checks:** `config/*.php` files for hardcoded secrets and insecure defaults
+
+**Findings:** 13 checks covering `app.php`, `session.php`, `cors.php`, `database.php`, and other config files
+
+**Priority:** Focus on findings that expose secrets or disable security features (e.g., `verify_ssl => false`).
+
+### dependency-scanner
+
+**What it checks:** Vulnerable Composer packages via [OSV.dev](https://osv.dev) API
+
+**Findings:** Live CVE database queries for every package in `composer.lock`
+
+**Output includes:**
+- CVE IDs and severity
+- Affected version ranges
+- Fixed versions
+- Remediation commands (e.g., `composer require package/name:^2.0`)
+
+**Priority:** Update packages with Critical or High CVEs immediately. Monitor Medium/Low CVEs for patches.
+
+### rules-scanner
+
+**What it checks:** 40+ YAML pattern rules covering secrets, injection, XSS, debug, crypto, config, and auth
+
+**Findings:** Varies based on enabled rules in `~/.ward/rules/`
+
+**Priority:** Address Critical and High findings (e.g., `eval()`, hardcoded AWS keys) before Medium/Low findings.
+
+## Best Practices for Reviewing Findings
+
+### 1. Triage by Severity
+
+Start with Critical and High findings. These represent immediate security risks.
+
+```bash
+# Focus on Critical and High only
+ward scan . --output json --fail-on high
+```
+
+### 2. Group by Category
+
+Tackle findings by category to streamline remediation:
+
+- **Secrets:** Rotate credentials, move to `.env`
+- **Injection:** Add parameter bindings, sanitize inputs
+- **Debug:** Remove `dd()`, `dump()`, `var_dump()`
+
+### 3. Use Baselines for Legacy Code
+
+If you have many findings in legacy code, create a baseline and focus on preventing **new** issues:
+
+```bash
+ward scan . --update-baseline .ward-baseline.json
+ward scan . --baseline .ward-baseline.json --fail-on high
+```
+
+### 4. Track Progress Over Time
+
+Run Ward regularly and watch the diff output:
+
+```
+[info] vs last scan: 0 new, 5 resolved (20→15)
+```
+
+Celebrate resolved findings and investigate new ones.
+
+### 5. Review Code Snippets
+
+Ward includes code snippets in findings. Use them to quickly identify false positives or confirm true positives without opening files.
+
+## Troubleshooting
+
+### False Positives
+
+**Symptom:** Finding reported for code that is actually safe.
+
+**Solutions:**
+- Add an `exclude_pattern` to the rule to skip the safe pattern
+- Disable the rule in `config.yaml` if it's not applicable to your project
+- Use comments to document why the code is safe (for future reference)
+
+### Missing Expected Findings
+
+**Symptom:** Known issue not appearing in scan results.
+
+**Solutions:**
+- Check that the scanner is enabled in `config.yaml`
+- Verify the rule is enabled (not in `rules.disable`)
+- Ensure the file is being scanned (not in `vendor/` or other excluded directories)
+- Check minimum severity in `config.yaml` (e.g., `severity: high` hides Medium/Low findings)
+
+### Duplicate Findings
+
+**Symptom:** Same issue reported multiple times.
+
+**Cause:** Different rules may detect the same pattern (e.g., both `SECRET-001` and `SECRET-002` detect hardcoded credentials).
+
+**Solution:** This is expected. Ward deduplicates by fingerprint, but different rules with different IDs create separate findings. Review both and fix the underlying issue.

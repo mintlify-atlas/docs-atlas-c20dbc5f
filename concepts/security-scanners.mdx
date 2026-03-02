@@ -1,0 +1,928 @@
+---
+title: Security Scanners
+description: Overview of Ward's 4 independent security scanner types and how they work
+---
+
+## Scanner Overview
+
+Ward includes 4 built-in scanner types that run independently during the **Scanners** stage of the pipeline. Each scanner focuses on a specific security domain:
+
+<CardGroup cols={2}>
+  <Card title="env-scanner" icon="file-lines" href="#env-scanner">
+    Checks `.env` files for misconfigurations and leaked secrets
+  </Card>
+  <Card title="config-scanner" icon="gear" href="#config-scanner">
+    Analyzes `config/*.php` for hardcoded credentials and insecure settings
+  </Card>
+  <Card title="dependency-scanner" icon="box" href="#dependency-scanner">
+    Live CVE lookup via OSV.dev for all Composer packages
+  </Card>
+  <Card title="rules-scanner" icon="list-check" href="#rules-scanner">
+    Pattern-based checks from YAML rules (40 default rules)
+  </Card>
+</CardGroup>
+
+## How Scanners Work
+
+All scanners implement the same interface and follow a consistent pattern:
+
+**Source:** `internal/models/scanner.go`
+
+```go
+type Scanner interface {
+    Name() string
+    Description() string
+    Scan(ctx context.Context, project ProjectContext, emit func(Finding)) ([]Finding, error)
+}
+```
+
+### Scanner Execution
+
+1. **Receive shared context** — Scanners get the `ProjectContext` built by resolvers
+2. **Perform checks** — Each scanner runs its domain-specific security analysis
+3. **Emit findings** — Real-time via callback for TUI updates
+4. **Return results** — All findings as a slice
+5. **Independence** — Scanners don't depend on each other; if one fails, others continue
+
+<Tip>
+  Scanners are **stateless** and **independent**. They could run in parallel (though currently sequential) because they only read from the shared immutable `ProjectContext`.
+</Tip>
+
+---
+
+## env-scanner
+
+**Source:** `internal/scanner/env/scanner.go`
+
+### Description
+
+Checks `.env` and `.env.example` files for security misconfigurations, weak credentials, and accidentally committed secrets.
+
+### Checks Performed (8 rules)
+
+<AccordionGroup>
+  <Accordion title="ENV-001: Missing .env file" icon="file-slash">
+    **Severity:** Info
+    
+    Detects when no `.env` file exists in the project root.
+    
+    **Why it matters:** While valid in containerized deployments, missing `.env` may indicate misconfiguration.
+    
+    **Remediation:**
+    ```bash
+    cp .env.example .env
+    php artisan key:generate
+    ```
+  </Accordion>
+  <Accordion title="ENV-002: APP_DEBUG is enabled" icon="bug">
+    **Severity:** High
+    
+    Detects `APP_DEBUG=true` in `.env`.
+    
+    **Why it matters:** Debug mode exposes stack traces, database queries, and environment variables to end users. Critical information disclosure in production.
+    
+    **Code check:**
+    ```go
+    if val, ok := envVars["APP_DEBUG"]; ok && strings.EqualFold(val, "true") {
+        // Create finding
+    }
+    ```
+    
+    **Remediation:**
+    ```bash
+    APP_DEBUG=false
+    ```
+  </Accordion>
+  <Accordion title="ENV-003: Empty or missing APP_KEY" icon="key">
+    **Severity:** Critical
+    
+    Detects when `APP_KEY` is missing or empty.
+    
+    **Why it matters:** Laravel uses `APP_KEY` to encrypt cookies, sessions, and passwords. Without it, all encrypted data is insecure.
+    
+    **Remediation:**
+    ```bash
+    php artisan key:generate
+    ```
+  </Accordion>
+  <Accordion title="ENV-004: Weak or default APP_KEY" icon="shield-xmark">
+    **Severity:** Critical
+    
+    Detects common weak keys like `base64:AAAAAAA...`, `SomeRandomString`, or keys shorter than 20 characters.
+    
+    **Code check:**
+    ```go
+    func isWeakKey(val string) bool {
+        lower := strings.ToLower(val)
+        if strings.HasPrefix(lower, "base64:aaaaaaa") {
+            return true
+        }
+        if lower == "somerandomstring" {
+            return true
+        }
+        if strings.HasPrefix(val, "base64:") && len(val) < 20 {
+            return true
+        }
+        return false
+    }
+    ```
+  </Accordion>
+  <Accordion title="ENV-005: Non-production APP_ENV" icon="flask">
+    **Severity:** Medium
+    
+    Detects `APP_ENV` set to `local`, `development`, or `dev`.
+    
+    **Why it matters:** Non-production environments may skip optimizations and enable debugging features.
+    
+    **Remediation:**
+    ```bash
+    APP_ENV=production
+    ```
+  </Accordion>
+  <Accordion title="ENV-006: Empty database password" icon="database">
+    **Severity:** Low
+    
+    Detects `DB_PASSWORD=` (empty value).
+    
+    **Why it matters:** While valid for local development with trust authentication, it's a risk in production.
+  </Accordion>
+  <Accordion title="ENV-007: File sessions in production" icon="file-user">
+    **Severity:** Low
+    
+    Detects `SESSION_DRIVER=file` when `APP_ENV=production`.
+    
+    **Why it matters:** File sessions don't scale across multiple servers and are slower than Redis/Memcached.
+    
+    **Remediation:**
+    ```bash
+    SESSION_DRIVER=redis
+    ```
+  </Accordion>
+  <Accordion title="ENV-008: Real credentials in .env.example" icon="eye">
+    **Severity:** Medium
+    
+    Detects non-placeholder values in `.env.example` for sensitive keys:
+    - `DB_PASSWORD`
+    - `MAIL_PASSWORD`
+    - `AWS_SECRET_ACCESS_KEY`
+    - `REDIS_PASSWORD`
+    - `PUSHER_APP_SECRET`
+    
+    **Why it matters:** `.env.example` is typically committed to version control. Real credentials here are exposed in Git history.
+    
+    **Code check:**
+    ```go
+    // Skip obvious placeholders
+    if lower == "null" || lower == "password" || lower == "changeme" {
+        continue
+    }
+    // Flag values longer than 6 chars that don't look like placeholders
+    if len(val) > 6 {
+        // Create finding
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Implementation Details
+
+**File parsing:**
+```go
+func readEnvFile(path string) (map[string]string, error) {
+    // Read line by line
+    // Skip comments and empty lines
+    // Parse KEY=VALUE pairs
+    // Strip quotes from values
+}
+```
+
+**Line number tracking:**
+```go
+func findLine(path, key string) int {
+    // Re-read file to find exact line number
+    // Enables code navigation in IDEs via SARIF
+}
+```
+
+---
+
+## config-scanner
+
+**Source:** `internal/scanner/configscan/scanner.go`
+
+### Description
+
+Analyzes all `config/*.php` files for hardcoded credentials, insecure defaults, and missing security flags.
+
+### Files Analyzed
+
+<CodeGroup>
+```bash Config Files
+config/app.php          # Debug mode, encryption cipher
+config/auth.php         # Password reset token expiry
+config/session.php      # Cookie flags (HttpOnly, Secure, SameSite)
+config/mail.php         # Hardcoded mail credentials
+config/cors.php         # CORS wildcard origins
+config/database.php     # Hardcoded DB credentials
+config/broadcasting.php # Hardcoded Pusher keys
+config/logging.php      # Hardcoded Slack webhooks
+```
+</CodeGroup>
+
+### Checks Performed (13 rules)
+
+<AccordionGroup>
+  <Accordion title="CFG-001: Debug mode hardcoded to true" icon="bug">
+    **Severity:** High
+    
+    **File:** `config/app.php`
+    
+    **Pattern:** `'debug' => true`
+    
+    **Why it matters:** Bypasses the `.env` setting, forcing debug mode even in production.
+    
+    **Remediation:**
+    ```php
+    'debug' => env('APP_DEBUG', false),
+    ```
+  </Accordion>
+  <Accordion title="CFG-002: Non-standard encryption cipher" icon="lock">
+    **Severity:** Medium
+    
+    **File:** `config/app.php`
+    
+    **Pattern:** `'cipher' => '(?!AES-256-CBC)...'`
+    
+    **Remediation:**
+    ```php
+    'cipher' => 'AES-256-CBC',
+    ```
+  </Accordion>
+  <Accordion title="CFG-003: Password reset token expiry too long" icon="clock">
+    **Severity:** Low
+    
+    **File:** `config/auth.php`
+    
+    **Pattern:** `'expire' => \d{3,}` (≥100 minutes)
+    
+    **Remediation:**
+    ```php
+    'expire' => 60, // 60 minutes
+    ```
+  </Accordion>
+  <Accordion title="CFG-004: Session cookie missing HttpOnly flag" icon="shield-xmark">
+    **Severity:** High
+    
+    **File:** `config/session.php`
+    
+    **Pattern:** `'http_only' => false`
+    
+    **Why it matters:** Allows JavaScript to read session cookies, enabling XSS-based session theft.
+    
+    **Remediation:**
+    ```php
+    'http_only' => true,
+    ```
+  </Accordion>
+  <Accordion title="CFG-005: Session cookie missing Secure flag" icon="wifi-slash">
+    **Severity:** Medium
+    
+    **File:** `config/session.php`
+    
+    **Pattern:** `'secure' => false`
+    
+    **Why it matters:** Cookies are sent over HTTP, allowing session hijacking via network sniffing.
+    
+    **Remediation:**
+    ```php
+    'secure' => env('SESSION_SECURE_COOKIE', true),
+    ```
+  </Accordion>
+  <Accordion title="CFG-006: Session cookie SameSite set to none" icon="arrows-turn-to-dots">
+    **Severity:** Medium
+    
+    **File:** `config/session.php`
+    
+    **Pattern:** `'same_site' => 'none'`
+    
+    **Why it matters:** Weakens CSRF protection by allowing cross-site cookie transmission.
+    
+    **Remediation:**
+    ```php
+    'same_site' => 'lax', // or 'strict'
+    ```
+  </Accordion>
+  <Accordion title="CFG-007: Session lifetime excessively long" icon="hourglass">
+    **Severity:** Low
+    
+    **File:** `config/session.php`
+    
+    **Pattern:** `'lifetime' => \d{4,}` (≥1000 minutes)
+  </Accordion>
+  <Accordion title="CFG-008: Mail password hardcoded" icon="envelope">
+    **Severity:** High
+    
+    **File:** `config/mail.php`
+    
+    **Pattern:** `'password' => '[^']{4,}'` (not using `env()`)
+    
+    **Code check:**
+    ```go
+    if line, n := findPattern(lines, `'password'\s*=>\s*'[^']{4,}'`); n > 0 {
+        if !strings.Contains(line, "env(") {
+            // Create finding
+        }
+    }
+    ```
+  </Accordion>
+  <Accordion title="CFG-009: CORS allows all origins" icon="globe">
+    **Severity:** Medium
+    
+    **File:** `config/cors.php`
+    
+    **Pattern:** `'allowed_origins' => ['*']`
+    
+    **Remediation:**
+    ```php
+    'allowed_origins' => [env('FRONTEND_URL')],
+    ```
+  </Accordion>
+  <Accordion title="CFG-010: CORS credentials with wildcard origin" icon="asterisk">
+    **Severity:** High
+    
+    **File:** `config/cors.php`
+    
+    **Why it matters:** Combining `supports_credentials => true` with wildcard origins allows any website to make authenticated requests to your API.
+    
+    **Remediation:** Never use wildcard origins with credentials enabled.
+  </Accordion>
+  <Accordion title="CFG-011: Database password hardcoded" icon="database">
+    **Severity:** High
+    
+    **File:** `config/database.php`
+    
+    **Pattern:** `'password' => '[^']{4,}'` (not using `env()`)
+  </Accordion>
+  <Accordion title="CFG-012: Broadcasting secret/key hardcoded" icon="tower-broadcast">
+    **Severity:** Medium
+    
+    **File:** `config/broadcasting.php`
+    
+    **Pattern:** `'(secret|key)' => '[a-zA-Z0-9]{10,}'` (not using `env()`)
+  </Accordion>
+  <Accordion title="CFG-013: Slack webhook URL hardcoded" icon="slack">
+    **Severity:** Medium
+    
+    **File:** `config/logging.php`
+    
+    **Pattern:** `hooks.slack.com/services` (not using `env()`)
+  </Accordion>
+</AccordionGroup>
+
+### Implementation Details
+
+**Pattern matching:**
+```go
+func findPattern(lines []string, pattern string) (string, int) {
+    re := regexp.Compile(pattern)
+    for i, line := range lines {
+        if re.MatchString(line) {
+            return strings.TrimSpace(line), i + 1
+        }
+    }
+    return "", 0
+}
+```
+
+**Value masking:**
+```go
+func maskConfigValue(line string) string {
+    // Replace 'password' => 'secret123' with 'password' => 'se****23'
+    re := regexp.MustCompile(`=> '([^']{4,})'`)
+    return re.ReplaceAllStringFunc(line, func(match string) string {
+        val := extract(match)
+        return "=> '" + val[:2] + "****" + val[len(val)-2:] + "'"
+    })
+}
+```
+
+---
+
+## dependency-scanner
+
+**Source:** `internal/scanner/dependency/scanner.go`
+
+### Description
+
+Performs **live CVE database lookups** via [OSV.dev](https://osv.dev) for all packages in `composer.lock`. This scanner requires network access.
+
+### How It Works
+
+<Steps>
+  <Step title="Read composer.lock">
+    Extract all installed packages with exact versions from the `ProjectContext.InstalledPackages` map (populated by the Package Resolver).
+  </Step>
+  <Step title="Batch query OSV.dev">
+    Send packages to OSV.dev's batch endpoint in groups of 100:
+    
+    ```go
+    const batchSize = 100
+    const osvBatchURL = "https://api.osv.dev/v1/querybatch"
+    
+    for i := 0; i < len(allQueries); i += batchSize {
+        batch := allQueries[i:i+batchSize]
+        // POST to OSV.dev
+    }
+    ```
+    
+    **Request format:**
+    ```json
+    {
+      "queries": [
+        {
+          "package": {"name": "symfony/http-kernel", "ecosystem": "Packagist"},
+          "version": "6.4.2"
+        }
+      ]
+    }
+    ```
+  </Step>
+  <Step title="Identify vulnerable packages">
+    OSV.dev returns which packages have known vulnerabilities. Ward extracts these for detailed queries.
+  </Step>
+  <Step title="Fetch full vulnerability details">
+    For each affected package, query the full vulnerability data:
+    
+    ```go
+    vulns, err := s.queryPackage(ctx, packageName, version)
+    ```
+    
+    **Response includes:**
+    - CVE ID and aliases
+    - Severity (Critical, High, Medium, Low)
+    - Affected version ranges
+    - Fixed version
+    - Advisory URLs
+  </Step>
+  <Step title="Generate findings">
+    Convert each vulnerability to a Ward finding with:
+    - CVE ID as the finding ID
+    - Severity mapping from OSV data
+    - Remediation with upgrade command
+    - Reference links to advisories
+  </Step>
+</Steps>
+
+### Finding Format
+
+**Example finding:**
+
+```go
+models.Finding{
+    ID:          "CVE-2024-28859",
+    Title:       "[CVE-2024-28859] symfony/http-kernel@6.4.2 — RCE via serialized objects",
+    Description: "Symfony HttpKernel vulnerable to remote code execution...",
+    Severity:    models.SeverityHigh,
+    Category:    "Dependencies",
+    Scanner:     "dependency-scanner",
+    File:        "composer.lock",
+    Remediation: "Upgrade symfony/http-kernel to 6.4.4 or later:\n  composer require symfony/http-kernel:^6.4.4",
+    References: [
+        "https://github.com/advisories/GHSA-...",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-28859",
+    ],
+}
+```
+
+### Severity Mapping
+
+**Source:** `dependency/scanner.go:306-319`
+
+```go
+func parseSeverity(s string) models.Severity {
+    switch strings.ToUpper(s) {
+    case "CRITICAL":
+        return models.SeverityCritical
+    case "HIGH":
+        return models.SeverityHigh
+    case "MODERATE", "MEDIUM":
+        return models.SeverityMedium
+    case "LOW":
+        return models.SeverityLow
+    default:
+        return models.SeverityMedium // default to medium for unknown
+    }
+}
+```
+
+### Performance Optimizations
+
+<CardGroup cols={2}>
+  <Card title="Batch Queries" icon="layer-group">
+    Sends up to 100 packages per request instead of individual queries, reducing HTTP overhead.
+  </Card>
+  <Card title="Two-Phase Lookup" icon="magnifying-glass">
+    First identifies which packages are vulnerable (lightweight), then fetches full details only for affected packages.
+  </Card>
+  <Card title="Version Normalization" icon="filter">
+    Skips dev branches (`dev-main`) that OSV.dev can't match:
+    ```go
+    if strings.HasPrefix(v, "dev-") {
+        return ""
+    }
+    ```
+  </Card>
+  <Card title="Timeout Protection" icon="clock">
+    Uses 30-second HTTP timeout to prevent hanging on slow networks.
+  </Card>
+</CardGroup>
+
+### Network Requirements
+
+<Warning>
+  This scanner requires outbound HTTPS access to `api.osv.dev`. In air-gapped environments, disable it:
+  
+  ```yaml
+  scanners:
+    disable:
+      - dependency-scanner
+  ```
+</Warning>
+
+---
+
+## rules-scanner
+
+**Source:** `internal/scanner/rules/scanner.go`
+
+### Description
+
+Executes pattern-based security checks defined in YAML rule files. Ward ships with 40 default rules and supports custom rules.
+
+### Rule Execution
+
+<Steps>
+  <Step title="Load rules">
+    Rules are loaded from:
+    - `~/.ward/rules/*.yaml` (default rules)
+    - Custom directories specified in config
+    
+    Only **enabled** rules are executed.
+  </Step>
+  <Step title="Resolve targets">
+    For each rule pattern, determine which files to scan based on the `target` field:
+    
+    **Predefined targets:**
+    - `php-files` → All `.php` files (recursive, skips `vendor/`)
+    - `blade-files` → `resources/views/**/*.blade.php`
+    - `config-files` → `config/*.php`
+    - `env-files` → `.env`, `.env.*`
+    - `routes-files` → `routes/*.php`
+    - `migration-files` → `database/migrations/*.php`
+    - `js-files` → `resources/js/**/*.{js,ts,jsx,tsx}`
+    
+    **Custom glob patterns:**
+    ```yaml
+    target: "app/Http/Controllers/**/*.php"
+    ```
+  </Step>
+  <Step title="Scan files">
+    For each file:
+    - Read line by line
+    - Match against the pattern (regex or substring)
+    - Exclude lines matching `exclude_pattern` if specified
+    - Record line number and code snippet
+  </Step>
+  <Step title="Handle negative patterns">
+    If `negative: true`, the rule triggers when the pattern is **NOT** found (useful for "must have X" checks).
+  </Step>
+  <Step title="Generate findings">
+    Create a finding for each match with:
+    - Rule metadata (ID, title, description, severity, category)
+    - File path and line number
+    - Code snippet (truncated to 200 chars)
+    - Remediation and references from rule definition
+  </Step>
+</Steps>
+
+### Pattern Types
+
+<Tabs>
+  <Tab title="regex">
+    Regular expression matching (line-by-line).
+    
+    **Example:**
+    ```yaml
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: 'DB::raw\s*\(\s*["\'].*\$'
+    ```
+    
+    Matches SQL injection via string interpolation in `DB::raw()`.
+  </Tab>
+  <Tab title="contains">
+    Exact substring matching.
+    
+    **Example:**
+    ```yaml
+    patterns:
+      - type: contains
+        target: blade-files
+        pattern: '{!! $'
+    ```
+    
+    Matches unescaped Blade output with user variables.
+  </Tab>
+  <Tab title="file-exists">
+    Checks if files matching a glob pattern exist.
+    
+    **Example:**
+    ```yaml
+    patterns:
+      - type: file-exists
+        pattern: '.env.backup'
+    ```
+    
+    Detects backup `.env` files that shouldn't be committed.
+  </Tab>
+</Tabs>
+
+### Negative Patterns
+
+**Use case:** Enforce that certain code patterns **must** be present.
+
+**Example:**
+```yaml
+patterns:
+  - type: contains
+    target: blade-files
+    pattern: '@csrf'
+    negative: true  # Trigger if @csrf is NOT found
+```
+
+This creates a finding for Blade forms missing CSRF protection.
+
+### Exclude Patterns
+
+**Use case:** Reduce false positives by excluding safe contexts.
+
+**Example:**
+```yaml
+patterns:
+  - type: regex
+    target: php-files
+    pattern: 'password.*='
+    exclude_pattern: 'env\(|config\('  # Ignore env() and config() calls
+```
+
+### Implementation Details
+
+**File walking with exclusions:**
+```go
+func skipDir(name string) bool {
+    switch name {
+    case "vendor", "node_modules", ".git", "storage", ".idea", ".vscode":
+        return true
+    }
+    return false
+}
+```
+
+**Pattern matching:**
+```go
+func scanFile(path string, pat config.PatternDef, re *regexp.Regexp) []match {
+    scanner := bufio.NewScanner(file)
+    lineNum := 0
+    for scanner.Scan() {
+        lineNum++
+        line := scanner.Text()
+        
+        var matched bool
+        switch pat.Type {
+        case "regex":
+            matched = re.MatchString(line)
+        case "contains":
+            matched = strings.Contains(line, pat.Pattern)
+        }
+        
+        // Skip if exclude pattern matches
+        if matched && excludeRe != nil && excludeRe.MatchString(line) {
+            matched = false
+        }
+        
+        if matched {
+            matches = append(matches, match{line: lineNum, text: line})
+        }
+    }
+    return matches
+}
+```
+
+### Default Rules Summary
+
+Ward ships with 40 rules across 7 categories:
+
+<AccordionGroup>
+  <Accordion title="Secrets (7 rules)" icon="key">
+    - Hardcoded passwords in code
+    - AWS credentials
+    - API keys and tokens
+    - JWT secrets
+    - Database credentials
+  </Accordion>
+  <Accordion title="Injection (6 rules)" icon="syringe">
+    - SQL injection via `DB::raw()` with interpolation
+    - Command injection via `exec()`, `shell_exec()`
+    - Code injection via `eval()`
+    - Unsafe deserialization with `unserialize()`
+  </Accordion>
+  <Accordion title="XSS (4 rules)" icon="code">
+    - Unescaped Blade output `{!! $var !!}`
+    - JavaScript injection in Blade
+    - `echo` with user input
+  </Accordion>
+  <Accordion title="Debug (6 rules)" icon="bug">
+    - `dd()` and `dump()` calls
+    - `var_dump()`, `print_r()`
+    - `phpinfo()`
+    - Laravel Debugbar in production
+  </Accordion>
+  <Accordion title="Crypto (5 rules)" icon="lock">
+    - MD5/SHA1 for password hashing
+    - `rand()` instead of `random_bytes()`
+    - Deprecated `mcrypt` functions
+    - Base64 mistaken for encryption
+  </Accordion>
+  <Accordion title="Security Config (7 rules)" icon="shield-halved">
+    - CORS wildcards
+    - SSL verification disabled
+    - CSRF middleware missing
+    - Mass assignment `$guarded = []`
+    - Unsafe file upload extensions
+  </Accordion>
+  <Accordion title="Auth (5 rules)" icon="user-lock">
+    - Missing authentication middleware
+    - Missing rate limiting
+    - `loginUsingId()` without validation
+    - Hardcoded admin checks
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Scanner Configuration
+
+### Disable Scanners
+
+**File:** `~/.ward/config.yaml`
+
+```yaml
+scanners:
+  disable:
+    - dependency-scanner  # Skip CVE checks
+    - rules-scanner       # Skip YAML pattern rules
+```
+
+### Disable Individual Rules
+
+```yaml
+rules:
+  disable:
+    - DEBUG-001  # Allow dd() calls
+    - AUTH-002   # Allow missing rate limiting
+```
+
+### Override Rule Severity
+
+```yaml
+rules:
+  override:
+    DEBUG-002:
+      severity: low  # Downgrade dump() from medium to low
+    CRYPTO-001:
+      severity: critical  # Upgrade MD5 hashing from high to critical
+```
+
+### Add Custom Rule Directories
+
+```yaml
+rules:
+  custom_dirs:
+    - /path/to/team-rules
+    - /path/to/project-specific-rules
+```
+
+---
+
+## Scanner Independence
+
+<Info>
+  Scanners are **fully independent** and don't communicate with each other. This design provides several benefits:
+  
+  - **Reliability:** If one scanner fails, others continue
+  - **Parallelization:** Scanners could run concurrently (future enhancement)
+  - **Modularity:** Easy to add/remove scanners without affecting others
+  - **Testing:** Each scanner can be unit tested in isolation
+</Info>
+
+### Shared Dependencies
+
+Scanners only depend on:
+1. The immutable `ProjectContext` (built by resolvers)
+2. The `emit` callback (for real-time updates)
+3. The `context.Context` (for cancellation)
+
+They do **not** depend on:
+- Other scanners' results
+- Filesystem state (all paths are in `ProjectContext.RootPath`)
+- Global state
+
+---
+
+## Adding Custom Scanners
+
+To create a new scanner:
+
+<Steps>
+  <Step title="Implement the Scanner interface">
+    ```go
+    package myscanner
+    
+    import (
+        "context"
+        "github.com/eljakani/ward/internal/models"
+    )
+    
+    type MyScanner struct{}
+    
+    func New() *MyScanner { return &MyScanner{} }
+    
+    func (s *MyScanner) Name() string {
+        return "my-scanner"
+    }
+    
+    func (s *MyScanner) Description() string {
+        return "My custom security checks"
+    }
+    
+    func (s *MyScanner) Scan(ctx context.Context, pc models.ProjectContext, emit func(models.Finding)) ([]models.Finding, error) {
+        var findings []models.Finding
+        
+        // Your scan logic here
+        f := models.Finding{
+            ID:          "CUSTOM-001",
+            Title:       "Custom check failed",
+            Description: "Details...",
+            Severity:    models.SeverityHigh,
+            Category:    "Custom",
+            Scanner:     s.Name(),
+            File:        "some-file.php",
+            Line:        42,
+        }
+        
+        findings = append(findings, f)
+        emit(f)  // Emit in real-time
+        
+        return findings, nil
+    }
+    ```
+  </Step>
+  <Step title="Register in the orchestrator">
+    **File:** `internal/orchestrator/orchestrator.go`
+    
+    ```go
+    scanners := []models.Scanner{
+        envscanner.New(),
+        configscanner.New(),
+        depscanner.New(),
+        myscanner.New(),  // Add your scanner
+    }
+    ```
+  </Step>
+  <Step title="Rebuild and test">
+    ```bash
+    make build
+    ward scan ./test-project
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Related Pages
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="diagram-project" href="/concepts/architecture">
+    System architecture and design principles
+  </Card>
+  <Card title="Scan Pipeline" icon="arrow-progress" href="/concepts/scan-pipeline">
+    How scanners fit into the 5-stage pipeline
+  </Card>
+  <Card title="Custom Rules" icon="file-code" href="/configuration/custom-rules">
+    Writing YAML rules for the rules-scanner
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration/config-file">
+    Scanner configuration options
+  </Card>
+</CardGroup>

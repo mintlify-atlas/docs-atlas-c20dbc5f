@@ -1,0 +1,394 @@
+---
+title: Output Formats
+description: Report output formats supported by Ward and when to use each
+---
+
+Ward generates security reports in multiple formats to suit different workflows. Configure output formats in `~/.ward/config.yaml` or override via the `--output` CLI flag.
+
+## Supported Formats
+
+Ward supports four output formats:
+
+| Format | File | Use Case |
+|--------|------|----------|
+| **JSON** | `ward-report.json` | Machine-readable, CI/CD pipelines, baseline generation |
+| **SARIF** | `ward-report.sarif` | GitHub Code Scanning, IDE integration, SAST tools |
+| **HTML** | `ward-report.html` | Visual review, stakeholder reports, browser viewing |
+| **Markdown** | `ward-report.md` | Pull requests, documentation, text-based review |
+
+<Note>
+JSON is always generated as a baseline, even if not explicitly configured. All other formats are optional.
+</Note>
+
+## Configuration
+
+Configure output formats in `~/.ward/config.yaml`:
+
+```yaml config.yaml
+output:
+  formats:
+    - json       # ward-report.json  — machine-readable
+    - sarif      # ward-report.sarif — GitHub Code Scanning / IDE integration
+    - html       # ward-report.html  — standalone visual report (dark theme)
+    - markdown   # ward-report.md    — text-based, great for PRs
+  dir: ./reports
+```
+
+### CLI Override
+
+Override formats for a single scan:
+
+```bash
+ward scan . --output json,sarif
+```
+
+This generates only JSON and SARIF reports, ignoring the config file settings.
+
+## JSON Format
+
+**File:** `ward-report.json`  
+**Implementation:** internal/reporter/json.go
+
+Machine-readable JSON format for programmatic consumption, CI/CD pipelines, and baseline generation.
+
+### Structure
+
+```json
+{
+  "project": {
+    "name": "my-laravel-app",
+    "path": "/path/to/project",
+    "laravel_version": "10.48.0",
+    "php_version": "8.2.0"
+  },
+  "summary": {
+    "total_findings": 42,
+    "by_severity": {
+      "Critical": 2,
+      "High": 8,
+      "Medium": 15,
+      "Low": 12,
+      "Info": 5
+    },
+    "duration": "2.3s",
+    "scanners_run": [
+      "env-scanner",
+      "config-scanner",
+      "dependency-scanner",
+      "rules-scanner"
+    ]
+  },
+  "findings": [
+    {
+      "id": "ENV-002",
+      "title": "Debug mode enabled in .env",
+      "description": "APP_DEBUG is set to true. This should be false in production.",
+      "severity": "High",
+      "category": "Configuration",
+      "scanner": "env-scanner",
+      "file": ".env",
+      "line": 3,
+      "code_snippet": "APP_DEBUG=true",
+      "remediation": "Set APP_DEBUG=false in your production .env file.",
+      "references": [
+        "https://laravel.com/docs/configuration#debug-mode"
+      ]
+    }
+  ]
+}
+```
+
+### Use Cases
+
+- **CI/CD pipelines** — Parse findings and fail builds based on severity
+- **Baseline generation** — Use with `--update-baseline` and `--baseline` flags
+- **Automated reporting** — Feed into dashboards or ticketing systems
+- **API integration** — Consume findings in external tools
+
+### Example: Parse in CI
+
+```bash
+#!/bin/bash
+ward scan . --output json
+
+# Count critical findings
+CRITICAL=$(jq '.summary.by_severity.Critical // 0' ward-report.json)
+
+if [ "$CRITICAL" -gt 0 ]; then
+  echo "❌ Found $CRITICAL critical findings"
+  exit 1
+fi
+```
+
+## SARIF Format
+
+**File:** `ward-report.sarif`  
+**Implementation:** internal/reporter/sarif.go  
+**Spec:** [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
+
+Static Analysis Results Interchange Format (SARIF) is an industry-standard JSON format for static analysis tools. Designed for integration with GitHub Code Scanning, IDEs, and SAST platforms.
+
+### Structure
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Ward",
+          "informationUri": "https://github.com/Eljakani/ward",
+          "version": "0.3.0",
+          "semanticVersion": "0.3.0",
+          "rules": [
+            {
+              "id": "ENV-002",
+              "name": "Debug mode enabled in .env",
+              "shortDescription": { "text": "Debug mode enabled in .env" },
+              "fullDescription": { "text": "APP_DEBUG is set to true. This should be false in production." },
+              "defaultConfiguration": { "level": "error" },
+              "help": { "text": "Set APP_DEBUG=false in your production .env file." },
+              "properties": {
+                "tags": ["Configuration"],
+                "security-severity": "high"
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "ENV-002",
+          "ruleIndex": 0,
+          "level": "error",
+          "message": { "text": "Debug mode enabled in .env" },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": { "uri": ".env" },
+                "region": {
+                  "startLine": 3,
+                  "snippet": { "text": "APP_DEBUG=true" }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash/v1": "a1b2c3d4e5f6"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Severity Mapping
+
+Ward severity levels map to SARIF levels as follows (internal/reporter/sarif.go:118-142):
+
+| Ward Severity | SARIF Level | SARIF Security Severity |
+|---------------|-------------|-------------------------|
+| Critical | `error` | `critical` |
+| High | `error` | `high` |
+| Medium | `warning` | `medium` |
+| Low | `note` | `low` |
+| Info | `note` | `informational` |
+
+### Use Cases
+
+#### GitHub Code Scanning
+
+Upload SARIF reports to GitHub Code Scanning for inline security annotations:
+
+```yaml .github/workflows/ward.yml
+name: Ward Security Scan
+on: [push, pull_request]
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ward
+        run: go install github.com/eljakani/ward@latest
+
+      - name: Run Ward
+        run: ward init && ward scan . --output sarif
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ward-report.sarif
+```
+
+Findings appear in the **Security** tab and as inline annotations on pull requests.
+
+#### IDE Integration
+
+Many IDEs (VS Code, JetBrains) can display SARIF results inline. Use the SARIF Viewer extension or built-in SARIF support.
+
+#### SAST Platform Integration
+
+SARIF is supported by most SAST platforms (SonarQube, Checkmarx, etc.) for importing third-party scan results.
+
+## HTML Format
+
+**File:** `ward-report.html`  
+**Implementation:** internal/reporter/html.go
+
+Standalone HTML report with dark theme, interactive collapsible findings, and visual severity breakdown.
+
+### Features
+
+- **Dark theme** — Optimized for readability with custom dark color scheme
+- **Sidebar navigation** — Jump to categories and findings
+- **Collapsible details** — Expand findings to see code snippets and remediation
+- **Severity breakdown** — Visual bar chart and stat cards
+- **Self-contained** — No external dependencies, works offline
+- **Print-friendly** — CSS print styles for PDF export
+
+### Screenshot
+
+<Frame>
+  <img src="/images/html-report-screenshot.png" alt="Ward HTML Report" />
+</Frame>
+
+### Use Cases
+
+- **Stakeholder reports** — Share visual reports with non-technical stakeholders
+- **Browser review** — Open in browser for quick visual inspection
+- **PDF export** — Print to PDF for archival or compliance
+- **Offline viewing** — No server required, works from filesystem
+
+### Example: Generate and Open
+
+```bash
+ward scan . --output html
+open ward-report.html  # macOS
+xdg-open ward-report.html  # Linux
+start ward-report.html  # Windows
+```
+
+## Markdown Format
+
+**File:** `ward-report.md`  
+**Implementation:** internal/reporter/markdown.go
+
+Text-based report with GitHub-flavored Markdown. Perfect for pull request comments, documentation, and text-based review.
+
+### Structure
+
+```markdown
+# Ward Security Report
+
+**Project:** my-laravel-app  
+**Laravel:** 10.48.0  
+**PHP:** 8.2.0  
+**Duration:** 2.3s  
+**Scanners:** env-scanner, config-scanner, dependency-scanner, rules-scanner  
+
+## Summary
+
+| Total | 42 |
+|-------|---|
+| 🔴 Critical | 2 |
+| 🟠 High | 8 |
+| 🟡 Medium | 15 |
+| 🟢 Low | 12 |
+| 🔵 Info | 5 |
+
+## Findings
+
+### 🔴 Critical (2)
+
+#### ENV-003 — Empty or missing APP_KEY
+
+- **File:** `.env:5`
+- **Category:** Configuration
+- **Scanner:** env-scanner
+
+APP_KEY is empty or not set. Laravel requires a valid application key for encryption.
+
+```
+APP_KEY=
+```
+
+**Remediation:**
+
+Generate a new key:
+  php artisan key:generate
+
+---
+
+### 🟠 High (8)
+
+...
+```
+
+### Use Cases
+
+- **Pull request comments** — Paste findings into PR descriptions
+- **Documentation** — Include in security runbooks or wikis
+- **Text review** — Review in terminal with `less` or `cat`
+- **CI logs** — Readable in plain-text CI logs
+
+### Example: Post to PR
+
+```bash
+#!/bin/bash
+ward scan . --output markdown
+
+# Post to GitHub PR (requires gh CLI)
+gh pr comment $PR_NUMBER --body-file ward-report.md
+```
+
+## Output Directory
+
+All report files are written to the configured output directory:
+
+```yaml config.yaml
+output:
+  dir: ./reports
+```
+
+This creates:
+
+```
+./reports/
+├── ward-report.json
+├── ward-report.sarif
+├── ward-report.html
+└── ward-report.md
+```
+
+<Tip>
+Set `dir: .` to write reports to the project root, or use an absolute path for a global reports directory.
+</Tip>
+
+## Headless Mode
+
+When `--output` is specified or no TTY is detected, Ward runs in headless mode:
+
+- No interactive TUI
+- Styled text output to stderr
+- Report files written to configured directory
+- Exit code based on `--fail-on` threshold
+
+```bash
+# Headless mode with JSON output
+ward scan . --output json
+
+# Headless mode with multiple formats
+ward scan . --output json,sarif,html
+```
+
+## Related Pages
+
+- [Configuration File](/configuration/config-file) — Configure default output formats
+- [CI Integration](/guides/ci-integration) — Using reports in CI/CD pipelines
+- [Baseline Management](/guides/baseline-management) — Using JSON reports for baseline suppression

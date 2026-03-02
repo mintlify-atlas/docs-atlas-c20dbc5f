@@ -1,80 +1,252 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick Start
+description: Run your first Ward scan in under 2 minutes
 ---
 
-## Get started in three steps
+## Your First Scan
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+<Steps>
+  <Step title="Initialize Ward">
+    Create Ward's configuration directory with default security rules:
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    ```bash
+    ward init
+    ```
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+    You'll see output confirming the initialization:
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```
+    Initialized Ward configuration.
+    
+    Created:
+      ~/.ward/config.yaml       main config
+      ~/.ward/rules/            custom rules
+      ~/.ward/reports/          scan reports
+      ~/.ward/store/            result store
+    
+    Edit config.yaml to customize scan behaviour.
+    Drop .yaml rule files into rules/ to add custom rules.
+    ```
+  </Step>
+  
+  <Step title="Scan a Laravel project">
+    Point Ward at your Laravel project directory:
+    
+    ```bash
+    ward scan /path/to/your/laravel-project
+    ```
+    
+    Ward will launch an interactive terminal UI showing real-time progress through each scan stage.
+    
+    <Tip>
+      You can also scan remote repositories:
+      
+      ```bash
+      ward scan https://github.com/user/laravel-project.git
+      ```
+    </Tip>
+  </Step>
+  
+  <Step title="Review findings">
+    After the scan completes, Ward displays an interactive results view where you can:
+    
+    - Browse findings sorted by severity
+    - View detailed descriptions and code snippets
+    - See remediation guidance
+    - Navigate with keyboard shortcuts (`j`/`k`, `Tab`, `s` to sort)
+    
+    Press `q` to exit.
+  </Step>
+</Steps>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## Understanding Scan Output
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+Ward runs through five stages:
 
-### Step 3: Go live
+1. **Provider** — Locates your Laravel project files
+2. **Resolvers** — Parses composer.json, .env, and config files
+3. **Scanners** — Runs security checks
+4. **Post-Process** — Deduplicates and filters findings
+5. **Report** — Generates output files
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+### Example Findings
 
-## Next steps
+Here are some common issues Ward detects:
 
-Now that you have your docs running, explore these key features:
+<CodeGroup>
+```bash ENV-002: APP_DEBUG Enabled
+File: .env:3
+Severity: High
+
+APP_DEBUG is set to true. In production, this exposes detailed 
+error messages including stack traces, database queries, and 
+environment variables to end users.
+
+Remediation:
+Set APP_DEBUG=false in your production .env file. Use Laravel's 
+logging system for error tracking instead.
+```
+
+```bash INJECT-001: DB::raw() with Variable Interpolation
+File: app/Http/Controllers/UserController.php:42
+Severity: High
+
+DB::raw() is called with a PHP variable, which may lead to SQL 
+injection if the variable contains unsanitized user input.
+
+Code:
+DB::raw("WHERE status = '$status'")
+
+Remediation:
+Use parameter bindings:
+  DB::select('SELECT * FROM users WHERE status = ?', [$status])
+Or use the query builder:
+  ->where('status', $status)
+```
+
+```bash SECRET-003: AWS Credentials Hardcoded
+File: config/services.php:28
+Severity: Critical
+
+AWS access key ID or secret access key found hardcoded in PHP source.
+These credentials grant access to AWS resources and must never be 
+committed to version control.
+
+Remediation:
+Use IAM roles or environment variables for AWS credentials:
+  AWS_ACCESS_KEY_ID=... in .env
+  AWS_SECRET_ACCESS_KEY=... in .env
+Immediately rotate any exposed keys in the AWS console.
+```
+</CodeGroup>
+
+## Headless Mode
+
+When no TTY is available or `--output` is specified, Ward runs in headless mode with styled text output:
+
+```bash
+ward scan ./my-app --output json
+```
+
+This generates reports without the interactive TUI, perfect for CI/CD pipelines.
+
+## CI Integration
+
+### Exit Codes with --fail-on
+
+Make your CI pipeline fail when Ward finds issues above a severity threshold:
+
+```bash
+# Exit code 1 if any High or Critical findings exist
+ward scan . --output json --fail-on high
+
+# Fail on any finding (including Info)
+ward scan . --output json --fail-on info
+```
+
+Severity threshold is inclusive: `--fail-on medium` fails on Medium, High, and Critical.
+
+### Baseline (Suppress Known Findings)
+
+On first run, generate a baseline of current findings:
+
+```bash
+ward scan . --output json --update-baseline .ward-baseline.json
+```
+
+On subsequent runs, suppress those known findings:
+
+```bash
+ward scan . --output json --baseline .ward-baseline.json --fail-on high
+```
+
+Only **new** findings (not in the baseline) will be reported. Commit `.ward-baseline.json` to your repo to track acknowledged findings.
+
+### Example GitHub Actions Workflow
+
+```yaml
+name: Ward Security Scan
+on: [push, pull_request]
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ward
+        run: go install github.com/eljakani/ward@latest
+
+      - name: Run Ward
+        run: |
+          ward init
+          ward scan . --output json,sarif \
+            --baseline .ward-baseline.json \
+            --fail-on high
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ward-report.sarif
+```
+
+## Report Formats
+
+Ward generates multiple report formats automatically:
+
+- `ward-report.json` — Machine-readable, always generated
+- `ward-report.sarif` — GitHub Code Scanning integration
+- `ward-report.html` — Standalone visual report with dark theme
+- `ward-report.md` — Text-based, great for pull requests
+
+Configure output formats in `~/.ward/config.yaml`:
+
+```yaml
+output:
+  formats: [json, sarif, html, markdown]
+  dir: ./reports
+```
+
+## Scan History
+
+Ward automatically saves each scan to `~/.ward/store/`. On subsequent scans of the same project, it shows what changed:
+
+```
+[info] vs last scan: 2 new, 3 resolved (12->11)
+```
+
+This lets you track security posture over time and catch regressions.
+
+## Keyboard Shortcuts
+
+When using the interactive TUI:
+
+| Key                | Action                                       |
+| ------------------ | -------------------------------------------- |
+| `q` / `Ctrl+C`     | Quit                                         |
+| `?`                | Toggle help                                  |
+| `Tab`              | Switch view or panel                         |
+| `j` / `k` / arrows | Navigate findings                            |
+| `s`                | Cycle sort column (severity, category, file) |
+| `Esc`              | Back to scan view                            |
+
+## Next Steps
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Built-in Scanners" icon="scanner" href="/concepts/security-scanners">
+    Learn about env-scanner, config-scanner, dependency-scanner, and rules-scanner
+  </Card>
+  
+  <Card title="Custom Rules" icon="code" href="/configuration/custom-rules">
+    Write your own security rules with YAML pattern matching
+  </Card>
+  
+  <Card title="CI Integration" icon="github" href="/guides/ci-integration">
+    Complete guide for GitHub Actions, GitLab CI, and more
+  </Card>
+  
+  <Card title="Configuration" icon="gear" href="/configuration/config-file">
+    Customize severity thresholds, disable scanners, and override rules
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

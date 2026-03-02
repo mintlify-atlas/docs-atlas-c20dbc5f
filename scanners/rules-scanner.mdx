@@ -1,0 +1,368 @@
+---
+title: Rules scanner
+description: YAML-based pattern matching engine for custom security checks
+---
+
+The rules scanner executes YAML-defined security rules against your Laravel project. Ward includes 40 built-in rules covering secrets, injection attacks, XSS, debug code, weak cryptography, and authentication issues.
+
+## How it works
+
+The rules scanner:
+
+1. **Loads rules** from `~/.ward/rules/*.yaml` and any custom directories
+2. **Filters** disabled rules and applies overrides from `config.yaml`
+3. **Matches patterns** against target files using regex, contains, or file-exists checks
+4. **Emits findings** for each match with severity, category, and remediation
+
+## Built-in rules
+
+Ward ships with **40 default rules** organized into 7 categories:
+
+<CardGroup cols={2}>
+  <Card title="Secrets" icon="key">
+    7 rules detecting hardcoded passwords, API keys, AWS credentials, JWT tokens, and generic secrets
+  </Card>
+  <Card title="Injection" icon="syringe">
+    6 rules for SQL injection, command injection, eval(), unserialize(), and code execution vulnerabilities
+  </Card>
+  <Card title="XSS" icon="code">
+    4 rules detecting unescaped Blade output (`{!! !!}`), JavaScript injection, and unsafe HTML rendering
+  </Card>
+  <Card title="Debug" icon="bug">
+    6 rules flagging dd(), dump(), var_dump(), phpinfo(), debug bars, and other debug artifacts
+  </Card>
+  <Card title="Cryptography" icon="lock">
+    5 rules identifying weak hashing (md5, sha1), rand() usage, mcrypt, and base64 misused as encryption
+  </Card>
+  <Card title="Security Config" icon="shield">
+    7 rules for CORS, SSL verification, CSRF, mass assignment, and unsafe file uploads
+  </Card>
+  <Card title="Authentication" icon="user-lock">
+    5 rules detecting missing middleware, rate limiting issues, and loginUsingId() abuse
+  </Card>
+</CardGroup>
+
+## Implementation details
+
+Extracted from `internal/scanner/rules/scanner.go`:
+
+### Rule evaluation
+
+```go
+// scanner.go:29-45
+func (s *Scanner) Scan(_ context.Context, project models.ProjectContext, emit func(models.Finding)) ([]models.Finding, error) {
+    var findings []models.Finding
+
+    for _, rule := range s.rules {
+        if !rule.Enabled {
+            continue
+        }
+
+        rf := s.evaluateRule(rule, project.RootPath)
+        for _, f := range rf {
+            findings = append(findings, f)
+            emit(f)
+        }
+    }
+
+    return findings, nil
+}
+```
+
+### Pattern types
+
+Three pattern matching modes are supported:
+
+<Tabs>
+  <Tab title="regex">
+    Regular expression matching against each line of the file:
+    
+    ```go
+    // scanner.go:102-108
+    var re *regexp.Regexp
+    if pat.Type == "regex" {
+        re, err = regexp.Compile(pat.Pattern)
+        if err != nil {
+            return nil // skip invalid regex
+        }
+    }
+    ```
+    
+    Example rule:
+    ```yaml
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: 'DB::raw\(.*\$'
+    ```
+  </Tab>
+  
+  <Tab title="contains">
+    Exact substring matching:
+    
+    ```go
+    // scanner.go:159-164
+    switch pat.Type {
+    case "regex":
+        matched = re.MatchString(line)
+    case "contains":
+        matched = strings.Contains(line, pat.Pattern)
+    }
+    ```
+    
+    Example rule:
+    ```yaml
+    patterns:
+      - type: contains
+        target: php-files
+        pattern: 'eval('
+    ```
+  </Tab>
+  
+  <Tab title="file-exists">
+    Checks if a file matching the glob pattern exists:
+    
+    ```go
+    // scanner.go:70-92
+    func (s *Scanner) checkFileExists(rule config.RuleDefinition, pat config.PatternDef, root string) []models.Finding {
+        matches, _ := filepath.Glob(filepath.Join(root, pat.Pattern))
+        found := len(matches) > 0
+        
+        if pat.Negative {
+            if found {
+                return nil
+            }
+            return []models.Finding{s.buildFinding(rule, pat.Pattern, 0, "")}
+        }
+        
+        if !found {
+            return nil
+        }
+        
+        // Create finding for each matching file
+    }
+    ```
+    
+    Example rule:
+    ```yaml
+    patterns:
+      - type: file-exists
+        target: php-files
+        pattern: 'config/debugbar.php'
+    ```
+  </Tab>
+</Tabs>
+
+### Target resolution
+
+The scanner resolves predefined targets to file globs:
+
+```go
+// scanner.go:227-250
+func targetGlobs(target, root string) []string {
+    switch target {
+    case "php-files":
+        return []string{filepath.Join(root, "*.php"), filepath.Join(root, "app", "*.php")}
+    case "blade-files":
+        return []string{filepath.Join(root, "resources", "views", "*.blade.php")}
+    case "config-files":
+        return []string{filepath.Join(root, "config", "*.php")}
+    case "env-files":
+        return []string{filepath.Join(root, ".env"), filepath.Join(root, ".env.*")}
+    case "routes-files":
+        return []string{filepath.Join(root, "routes", "*.php")}
+    case "migration-files":
+        return []string{filepath.Join(root, "database", "migrations", "*.php")}
+    case "js-files":
+        return []string{filepath.Join(root, "resources", "js", "*.js"), filepath.Join(root, "resources", "js", "*.ts")}
+    default:
+        // Custom glob pattern
+        if strings.ContainsAny(target, "*?[") {
+            return []string{filepath.Join(root, target)}
+        }
+        return nil
+    }
+}
+```
+
+For `php-files`, `blade-files`, and `js-files`, the scanner **recursively walks** subdirectories while skipping `vendor`, `node_modules`, `.git`, and other common exclusions.
+
+### Negative patterns
+
+Negative patterns trigger when a pattern is **absent**:
+
+```go
+// scanner.go:118-127
+if pat.Negative {
+    // Finding if pattern was NOT found in this file
+    if len(matches) == 0 {
+        findings = append(findings, s.buildFinding(rule, rel, 0, ""))
+    }
+} else {
+    for _, m := range matches {
+        findings = append(findings, s.buildFinding(rule, rel, m.line, m.text))
+    }
+}
+```
+
+Example use case:
+
+```yaml
+- id: AUTH-005
+  title: "Missing @csrf directive in form"
+  patterns:
+    - type: contains
+      target: blade-files
+      pattern: '<form'
+      negative: true  # Trigger if <form> exists but @csrf does NOT
+    - type: contains
+      target: blade-files
+      pattern: '@csrf'
+      negative: true
+```
+
+### Exclude patterns
+
+Exclude patterns filter out false positives:
+
+```go
+// scanner.go:146-170
+var excludeRe *regexp.Regexp
+if pat.ExcludePattern != "" {
+    excludeRe, _ = regexp.Compile(pat.ExcludePattern)
+}
+
+for scanner.Scan() {
+    line := scanner.Text()
+    
+    var matched bool
+    // ... pattern matching logic ...
+    
+    // Skip if the line also matches the exclude pattern
+    if matched && excludeRe != nil && excludeRe.MatchString(line) {
+        matched = false
+    }
+}
+```
+
+Example:
+
+```yaml
+patterns:
+  - type: regex
+    target: php-files
+    pattern: 'password.*=.*"[^"]+"'
+    exclude_pattern: 'env\('  # Ignore lines with env() calls
+```
+
+## Example built-in rules
+
+### SQL injection detection
+
+From `rules/injection.yaml`:
+
+```yaml
+- id: INJECT-001
+  title: "Potential SQL injection via DB::raw with variable interpolation"
+  description: "DB::raw() is being called with what looks like variable interpolation. This can lead to SQL injection if user input reaches the query."
+  severity: high
+  category: Injection
+  enabled: true
+  patterns:
+    - type: regex
+      target: php-files
+      pattern: 'DB::raw\(.*\$'
+  remediation: |
+    Use parameter binding instead:
+      DB::raw('SELECT * FROM users WHERE id = ?', [$userId])
+    Or use query builder methods:
+      DB::table('users')->where('id', $userId)->get()
+  references:
+    - https://owasp.org/www-community/attacks/SQL_Injection
+```
+
+### Hardcoded AWS credentials
+
+From `rules/secrets.yaml`:
+
+```yaml
+- id: SECRET-003
+  title: "Hardcoded AWS credentials"
+  description: "AWS access key or secret key appears to be hardcoded in source code."
+  severity: critical
+  category: Secrets
+  enabled: true
+  patterns:
+    - type: regex
+      target: php-files
+      pattern: 'AKIA[0-9A-Z]{16}'
+    - type: regex
+      target: php-files
+      pattern: 'aws_secret.*=.*["''][^"'']{20,}'
+  remediation: |
+    Move AWS credentials to .env:
+      AWS_ACCESS_KEY_ID=your_key_here
+      AWS_SECRET_ACCESS_KEY=your_secret_here
+    
+    Then use in code:
+      'key' => env('AWS_ACCESS_KEY_ID')
+```
+
+### Unescaped Blade output (XSS)
+
+From `rules/xss.yaml`:
+
+```yaml
+- id: XSS-001
+  title: "Unescaped Blade output"
+  description: "The {!! !!} syntax outputs raw HTML without escaping. If the variable contains user input, this creates an XSS vulnerability."
+  severity: high
+  category: XSS
+  enabled: true
+  patterns:
+    - type: regex
+      target: blade-files
+      pattern: '\{!!.*\$.*!!\}'
+  remediation: |
+    Use {{ }} for automatic HTML escaping:
+      {{ $variable }}
+    
+    Only use {!! !!} for trusted HTML content, never user input.
+```
+
+## Writing custom rules
+
+See the [Writing custom rules](/guides/writing-custom-rules) guide for detailed instructions on creating your own rules.
+
+## Performance considerations
+
+- **Regex compilation**: Rules with invalid regex are skipped (logged in verbose mode)
+- **File walking**: Vendor and node_modules are automatically excluded
+- **Lazy evaluation**: Rules are only evaluated against matching target files
+- **Typical scan time**: 1-3 seconds for 40 rules on a medium Laravel project
+
+## Disabling rules
+
+Disable individual rules:
+
+```yaml ~/.ward/config.yaml
+rules:
+  disable:
+    - DEBUG-001  # Allow dd() in codebase
+    - XSS-001    # Allow {!! !!} (not recommended)
+```
+
+Or disable the entire rules scanner:
+
+```yaml
+scanners:
+  disable:
+    - rules-scanner
+```
+
+## Related documentation
+
+- [Writing custom rules](/guides/writing-custom-rules) - Authoring guide
+- [Rule format](/api/rule-format) - Complete YAML schema
+- [Pattern types](/api/pattern-types) - Pattern matching reference
+- [Target types](/api/target-types) - File target reference

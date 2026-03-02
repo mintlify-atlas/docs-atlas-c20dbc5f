@@ -1,97 +1,130 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: Introduction
+description: A security scanner built specifically for Laravel applications
 ---
 
-## Setting up
+<img src="/images/ward-logo.svg" alt="Ward" width="500" />
 
-Get your documentation site up and running in minutes.
+## What is Ward?
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+Ward understands your Laravel application — its routes, models, controllers, middleware, Blade templates, config files, `.env` secrets, Composer dependencies, and more. It doesn't just grep for patterns. It resolves your project's structure first, then runs targeted security checks against it.
 
-## Make it yours
+Laravel gives you a lot out of the box — CSRF protection, Eloquent's mass assignment guards, Bcrypt hashing, encrypted cookies. But it's easy to misconfigure things or leave gaps that standard linters won't catch.
 
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Smart Analysis" icon="magnifying-glass">
+    Ward resolves your project structure first — parsing composer.json, .env, config files — then runs targeted checks against that context
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  
+  <Card title="Live CVE Database" icon="shield-check">
+    Queries OSV.dev in real-time to check all Composer dependencies against the entire Packagist advisory database
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  
+  <Card title="40+ Security Rules" icon="list-check">
+    Built-in YAML rules covering secrets, SQL injection, XSS, debug artifacts, weak crypto, auth issues, and mass assignment
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  
+  <Card title="Custom Rules" icon="code">
+    Drop YAML files into ~/.ward/rules/ to add team-specific security checks with regex, substring, or file-exists patterns
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What Ward Detects
 
-Everything you need to create world-class documentation.
+Ward checks for common Laravel security issues that are easy to miss:
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+- `APP_DEBUG=true` shipping to production
+- A controller action with no authorization check
+- `$guarded = []` on a model that handles payments
+- `DB::raw()` with interpolated user input
+- Session cookies without the `Secure` flag
+- An API route group missing `auth:sanctum`
+- Outdated Composer packages with known CVEs
+- Blade templates using `{!! !!}` on user data
 
-## Need inspiration?
+## How It Works
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+Ward scans your project in a pipeline of five stages:
+
+```
+ Provider  -->  Resolvers  -->  Scanners  -->  Post-Process  -->  Report
+```
+
+**1. Provider** — Locates and prepares your project source. Supports local paths and git URLs (shallow clone).
+
+**2. Resolvers** — Parses `composer.json`, `composer.lock`, `.env`, and `config/*.php` to build a structured project context: framework version, PHP version, installed packages, environment variables, config files.
+
+**3. Scanners** — Independent security checks run against the resolved context:
+
+| Scanner              | What it checks                                                                                                                                             |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `env-scanner`        | `.env` misconfigurations — debug mode, empty APP_KEY, non-production env, weak credentials, leaked secrets in `.env.example`                               |
+| `config-scanner`     | `config/*.php` — hardcoded debug mode, session cookie flags, CORS wildcards, hardcoded credentials in config files                                         |
+| `dependency-scanner` | `composer.lock` — **live CVE lookup** via [OSV.dev](https://osv.dev) against the entire Packagist advisory database (no hardcoded list, always up-to-date) |
+| `rules-scanner`      | 40 built-in YAML rules covering secrets, SQL/command/code injection, XSS, debug artifacts, weak crypto, auth issues, mass assignment, unsafe file uploads  |
+
+**4. Post-Process** — Deduplicates findings, filters by minimum severity (from config), and diffs against your last scan to show what's new vs resolved.
+
+**5. Report** — Generates output in multiple formats and saves scan history for trending.
+
+## Built for CI/CD
+
+Ward fits into the workflow you already have — run it locally during development, or wire it into CI to gate deployments.
+
+<CodeGroup>
+```yaml GitHub Actions
+name: Ward Security Scan
+on: [push, pull_request]
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ward
+        run: go install github.com/eljakani/ward@latest
+
+      - name: Run Ward
+        run: ward init && ward scan . --output json
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ward-report.sarif
+```
+
+```yaml GitLab CI
+ward-scan:
+  image: golang:latest
+  script:
+    - go install github.com/eljakani/ward@latest
+    - ward init && ward scan . --output json
+  artifacts:
+    paths:
+      - ward-report.*
+    when: always
+```
+</CodeGroup>
+
+## Report Formats
+
+Ward generates reports in multiple formats:
+
+- **JSON** — machine-readable baseline for CI integration
+- **SARIF** — GitHub Code Scanning and IDE integration
+- **HTML** — standalone visual report with dark theme
+- **Markdown** — text-based, great for pull requests
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install Ward using go install or build from source
+  </Card>
+  
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Run your first scan in under 2 minutes
+  </Card>
+</CardGroup>

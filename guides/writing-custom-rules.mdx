@@ -1,0 +1,592 @@
+---
+title: Writing Custom Rules
+description: Create custom security rules to detect project-specific vulnerabilities and coding patterns
+---
+
+Ward's rules engine is fully extensible. Drop YAML files into `~/.ward/rules/` and Ward automatically loads them alongside the 40 built-in rules. No recompilation required.
+
+## Rule Anatomy
+
+A rule file is a YAML document with a `rules` array. Here's the structure:
+
+```yaml
+rules:
+  - id: TEAM-001
+    title: "Hardcoded internal service URL"
+    description: "Detects hardcoded URLs to internal services."
+    severity: medium
+    category: Configuration
+    enabled: true
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: 'https?://internal-service\.\w+'
+    remediation: |
+      Use environment variables:
+        $url = env('INTERNAL_SERVICE_URL');
+    references:
+      - https://example.com/docs/configuration
+```
+
+### Required Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Unique identifier (e.g., `TEAM-001`, `CUSTOM-042`). Use a prefix to avoid collisions with built-in rules. |
+| `title` | string | Short, descriptive title shown in reports and TUI. |
+| `description` | string | Detailed explanation of what this rule detects and why it's a problem. |
+| `severity` | string | One of: `info`, `low`, `medium`, `high`, `critical` |
+| `category` | string | Category for grouping (e.g., `Secrets`, `Injection`, `Configuration`, `Custom`) |
+| `enabled` | boolean | Set to `true` to activate the rule, `false` to disable it. |
+| `patterns` | array | One or more pattern definitions (see below). |
+
+### Optional Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `remediation` | string | Guidance on how to fix the issue. Supports multi-line text. |
+| `references` | array | URLs to documentation, CWE entries, or OWASP guidelines. |
+| `tags` | array | Tags for filtering and categorization (e.g., `[sqli, owasp-a03, cwe-89]`) |
+
+## Pattern Types
+
+Ward supports three pattern types: `regex`, `contains`, and `file-exists`.
+
+### Regex Patterns
+
+Match a regular expression against file contents (line-by-line).
+
+```yaml
+patterns:
+  - type: regex
+    target: php-files
+    pattern: '\$password\s*=\s*[''"][a-zA-Z0-9!@#$%^&*_.]{4,}'
+```
+
+**Use cases:**
+- Detecting function calls with specific arguments
+- Finding variable assignments
+- Matching complex patterns (e.g., AWS keys, JWTs)
+
+**Regex syntax:** Go's RE2 syntax (similar to PCRE, but no backtracking). See [Go regex docs](https://pkg.go.dev/regexp/syntax).
+
+**Tips:**
+- Escape special characters: `\(`, `\)`, `\.`
+- Use character classes: `\w` (word chars), `\d` (digits), `\s` (whitespace)
+- Use non-greedy quantifiers when needed: `.*?`
+
+### Contains Patterns
+
+Match an exact substring anywhere in the file.
+
+```yaml
+patterns:
+  - type: contains
+    target: blade-files
+    pattern: "{!! $"
+```
+
+**Use cases:**
+- Simple string matching (faster than regex)
+- Finding exact function names
+- Detecting directives or keywords
+
+**Case sensitivity:** Contains is **case-sensitive**. Use regex with `(?i)` for case-insensitive matching.
+
+### File-Exists Patterns
+
+Trigger if a file matching the glob pattern exists.
+
+```yaml
+patterns:
+  - type: file-exists
+    target: ".env.backup"
+```
+
+**Use cases:**
+- Detecting backup files (`.env.backup`, `.env.old`)
+- Finding debug files (`phpinfo.php`, `test.php`)
+- Checking for exposed sensitive files
+
+**Glob syntax:** Standard glob patterns. `*` matches any characters, `**` matches directories recursively.
+
+## Pattern Targets
+
+Targets define which files Ward scans for each pattern.
+
+### Built-in Targets
+
+| Target | Files Matched |
+|--------|---------------|
+| `php-files` | All `.php` files (recursive, skips `vendor/`) |
+| `blade-files` | `resources/views/**/*.blade.php` |
+| `config-files` | `config/*.php` |
+| `env-files` | `.env`, `.env.*` |
+| `routes-files` | `routes/*.php` |
+| `migration-files` | `database/migrations/*.php` |
+| `js-files` | `resources/js/**/*.{js,ts,jsx,tsx}` |
+
+### Custom Glob Targets
+
+Specify any custom glob pattern as the target:
+
+```yaml
+patterns:
+  - type: regex
+    target: "app/Services/**/*.php"
+    pattern: 'curl_exec\('
+```
+
+Custom globs are relative to the project root.
+
+## Multiple Patterns
+
+Rules can have multiple patterns. A finding is reported if **any** pattern matches.
+
+```yaml
+rules:
+  - id: INJECT-001
+    title: "DB::raw() with variable interpolation"
+    severity: high
+    category: Injection
+    enabled: true
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: 'DB::raw\(\s*[''"].*\$'
+      - type: regex
+        target: php-files
+        pattern: 'DB::raw\(\s*\$'
+```
+
+Both patterns check for SQL injection via `DB::raw()`. If either matches, a finding is created.
+
+## Negative Patterns
+
+Set `negative: true` to trigger when a pattern is **absent**. This is useful for "must have X" checks.
+
+### Example: Missing CSRF Directive
+
+Detect Blade forms missing the `@csrf` directive:
+
+```yaml
+rules:
+  - id: CUSTOM-001
+    title: "Missing @csrf in Blade form"
+    description: >
+      A <form> tag in a Blade template does not include @csrf.
+      Laravel requires CSRF tokens for all POST, PUT, PATCH, and DELETE requests.
+    severity: medium
+    category: Security
+    enabled: true
+    patterns:
+      - type: contains
+        target: blade-files
+        pattern: "<form"
+      - type: contains
+        target: blade-files
+        pattern: "@csrf"
+        negative: true
+    remediation: |
+      Add @csrf inside every Blade form:
+        <form method="POST" action="/profile">
+            @csrf
+            ...
+        </form>
+```
+
+How it works:
+1. First pattern checks if the file contains `<form>`
+2. Second pattern (negative) triggers if `@csrf` is **not** found
+3. If both conditions are true, a finding is reported
+
+<Warning>
+Negative patterns apply to the **entire file**, not individual lines. If `@csrf` appears anywhere in the file, the negative pattern does not match.
+</Warning>
+
+## Exclude Patterns
+
+Use `exclude_pattern` to reduce false positives by skipping lines that match a secondary pattern.
+
+### Example: Allow Commented Shell Commands
+
+Detect shell execution functions, but ignore commented lines:
+
+```yaml
+rules:
+  - id: INJECT-003
+    title: "Shell command execution function"
+    severity: high
+    category: Injection
+    enabled: true
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: '\b(exec|system|shell_exec|passthru|popen|proc_open)\s*\('
+        exclude_pattern: '(//|\*|test)'
+```
+
+Lines matching the `exclude_pattern` (comments or test files) are skipped.
+
+**Use cases:**
+- Ignore commented code
+- Skip test files
+- Exclude known safe patterns (e.g., `escapeshellarg()`)
+
+## Complete Rule Examples
+
+### Detect Hardcoded AWS Keys
+
+```yaml
+rules:
+  - id: TEAM-AWS-001
+    title: "AWS credentials hardcoded in source"
+    description: >
+      AWS access key ID or secret access key found hardcoded in PHP source.
+      These credentials grant access to AWS resources and must never be committed.
+    severity: critical
+    category: Secrets
+    enabled: true
+    tags: [secrets, aws, cwe-798]
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: '(AKIA[0-9A-Z]{16}|aws_secret_access_key\s*[=:]\s*[''"][A-Za-z0-9/+=]{20,})'
+    remediation: |
+      Use IAM roles or environment variables for AWS credentials:
+        AWS_ACCESS_KEY_ID=... in .env
+        AWS_SECRET_ACCESS_KEY=... in .env
+      Immediately rotate any exposed keys in the AWS console.
+    references:
+      - https://cwe.mitre.org/data/definitions/798.html
+      - https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html
+```
+
+### Detect Unescaped Blade Output
+
+```yaml
+rules:
+  - id: TEAM-XSS-001
+    title: "Unescaped Blade output with variable"
+    description: >
+      The Blade {!! !!} syntax outputs raw, unescaped HTML. If the variable
+      contains user input, this leads to XSS vulnerabilities.
+    severity: high
+    category: XSS
+    enabled: true
+    tags: [xss, owasp-a03, cwe-79]
+    patterns:
+      - type: regex
+        target: blade-files
+        pattern: '\{!!\s*\$'
+    remediation: |
+      Use {{ }} for automatic HTML escaping:
+        {{ $variable }}
+      Only use {!! !!} for trusted, sanitized HTML.
+    references:
+      - https://laravel.com/docs/blade#displaying-data
+      - https://owasp.org/www-community/attacks/xss/
+```
+
+### Detect Missing Route Middleware
+
+```yaml
+rules:
+  - id: TEAM-AUTH-001
+    title: "API route group without authentication"
+    description: >
+      An API route group in routes/api.php does not include auth:sanctum or
+      auth:api middleware. Unprotected API endpoints can be accessed anonymously.
+    severity: high
+    category: Authentication
+    enabled: true
+    tags: [auth, api, owasp-a07]
+    patterns:
+      - type: regex
+        target: routes-files
+        pattern: 'Route::group\('
+      - type: regex
+        target: routes-files
+        pattern: 'auth:(sanctum|api)'
+        negative: true
+    remediation: |
+      Add authentication middleware to your route groups:
+        Route::middleware('auth:sanctum')->group(function () {
+            Route::get('/user', [UserController::class, 'show']);
+        });
+    references:
+      - https://laravel.com/docs/sanctum
+      - https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/
+```
+
+### Detect Debug Artifacts
+
+```yaml
+rules:
+  - id: TEAM-DEBUG-001
+    title: "dd() or dump() left in code"
+    description: >
+      Laravel debug helpers dd() or dump() are present in source code. These
+      should be removed before deployment as they expose application internals.
+    severity: low
+    category: Debug
+    enabled: true
+    tags: [debug, information-disclosure]
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: '\b(dd|dump)\s*\('
+        exclude_pattern: '(//|\*|test|Tests)'
+    remediation: |
+      Remove debug statements before committing:
+        - dd($variable);
+        + // Removed debug statement
+      Use logging instead:
+        Log::debug('User data', ['user' => $user]);
+```
+
+## Rule Organization
+
+Ward loads all `.yaml` and `.yml` files from `~/.ward/rules/`. Organize rules by category for maintainability:
+
+```
+~/.ward/rules/
+├── secrets.yaml          # Built-in secrets rules
+├── injection.yaml        # Built-in injection rules
+├── xss.yaml              # Built-in XSS rules
+├── team-secrets.yaml     # Custom: company-specific secrets
+├── team-api.yaml         # Custom: API security rules
+└── team-compliance.yaml  # Custom: regulatory compliance rules
+```
+
+### Example: Team Secrets Rules
+
+Create `~/.ward/rules/team-secrets.yaml`:
+
+```yaml
+# Team-Specific Secret Detection Rules
+# Detects company-specific API keys, tokens, and credentials
+
+rules:
+  - id: ACME-001
+    title: "Hardcoded Acme Corp API token"
+    description: "Detects hardcoded Acme Corp API tokens (format: acme_live_...)."
+    severity: critical
+    category: Secrets
+    enabled: true
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: 'acme_(live|test)_[a-zA-Z0-9]{32}'
+    remediation: |
+      Store Acme API tokens in .env:
+        ACME_API_TOKEN=acme_live_...
+      Load via:
+        $token = env('ACME_API_TOKEN');
+
+  - id: ACME-002
+    title: "Internal API base URL hardcoded"
+    description: "Internal service URLs should use config/services.php."
+    severity: medium
+    category: Configuration
+    enabled: true
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: 'https://internal\.acmecorp\.com'
+    remediation: |
+      Use configuration:
+        config/services.php:
+          'acme' => ['base_url' => env('ACME_BASE_URL')],
+        Code:
+          $url = config('services.acme.base_url');
+```
+
+## Loading Custom Rules from Additional Directories
+
+Add extra rule directories in `~/.ward/config.yaml`:
+
+```yaml
+rules:
+  custom_dirs:
+    - /path/to/team-rules
+    - /path/to/compliance-rules
+```
+
+Ward loads rules from:
+1. `~/.ward/rules/` (default)
+2. All directories in `rules.custom_dirs`
+
+## Rule Overrides
+
+Disable or change severity of any rule (built-in or custom) in `~/.ward/config.yaml`:
+
+```yaml
+rules:
+  disable:
+    - DEBUG-001    # Disable built-in rule
+    - TEAM-001     # Disable custom rule
+  override:
+    CRYPTO-003:
+      severity: low    # Downgrade from medium to low
+    AUTH-001:
+      enabled: false   # Disable without adding to disable list
+```
+
+Overrides apply **after** all rules are loaded, making it easy to customize Ward without editing rule files.
+
+## Testing Custom Rules
+
+### 1. Create a Test File
+
+Create a PHP file with the pattern you want to detect:
+
+```php
+<?php
+// test-team-001.php
+
+$apiKey = "acme_live_abc123def456ghi789jkl012mno345pq";
+```
+
+### 2. Run Ward
+
+```bash
+ward scan /path/to/test-file
+```
+
+### 3. Verify Detection
+
+Check that your rule triggers:
+
+```
+● Scanners
+  ✓ rules-scanner — 1 findings
+
+Done. 1 findings in 0.8s
+  Critical   1
+
+Finding: ACME-001 - Hardcoded Acme Corp API token
+File: test-team-001.php:3
+```
+
+### 4. Iterate
+
+Adjust the pattern, severity, or description as needed and re-run.
+
+## Rule Schema Reference
+
+Complete YAML schema for reference:
+
+```yaml
+rules:
+  - id: string                # Required: Unique rule ID
+    title: string             # Required: Short title
+    description: string       # Required: Detailed explanation
+    severity: string          # Required: info, low, medium, high, critical
+    category: string          # Required: Grouping category
+    enabled: boolean          # Required: true or false
+    tags:                     # Optional: Array of tags
+      - string
+    patterns:                 # Required: Array of pattern definitions
+      - type: string          # Required: regex, contains, file-exists
+        target: string        # Required: php-files, blade-files, or custom glob
+        pattern: string       # Required: Pattern to match
+        negative: boolean     # Optional: true = trigger when pattern is absent
+        exclude_pattern: string # Optional: Skip lines matching this pattern
+    remediation: string       # Optional: Multi-line remediation guidance
+    references:               # Optional: Array of URLs
+      - string
+```
+
+## Best Practices
+
+### 1. Use Descriptive IDs
+
+Choose IDs that indicate ownership and category:
+
+```yaml
+# Good
+id: TEAM-AUTH-001
+id: ACME-SECRET-042
+id: COMPLIANCE-PCI-001
+
+# Avoid
+id: RULE-1
+id: CUSTOM
+id: FIX-THIS
+```
+
+### 2. Write Clear Descriptions
+
+Explain **what** is detected and **why** it's a problem:
+
+```yaml
+# Good
+description: >
+  A password appears to be hardcoded as a string literal. Hardcoded passwords
+  are visible to anyone with source code access and cannot be rotated without
+  a code deploy.
+
+# Avoid
+description: "Bad password"
+```
+
+### 3. Provide Remediation
+
+Include actionable guidance on how to fix the issue:
+
+```yaml
+remediation: |
+  Use environment variables instead:
+    $password = env('DB_PASSWORD');
+  Or use Laravel's config system:
+    $password = config('database.connections.mysql.password');
+```
+
+### 4. Test with Real Code
+
+Test patterns against actual project files, not just contrived examples. This helps catch edge cases and false positives.
+
+### 5. Use Exclude Patterns Judiciously
+
+Exclude patterns reduce false positives but can also hide real issues. Use them sparingly:
+
+```yaml
+# Good: Exclude comments and tests
+exclude_pattern: '(//|\*|test|Tests)'
+
+# Avoid: Overly broad exclusions
+exclude_pattern: '.*'
+```
+
+## Troubleshooting
+
+### Rule not triggering
+
+**Symptom:** Expected findings don't appear in scan results.
+
+**Solutions:**
+- Verify `enabled: true` in the rule
+- Check that the rule isn't in `rules.disable` in `config.yaml`
+- Test the regex pattern in isolation (use https://regex101.com with flavor "Golang")
+- Ensure the `target` matches the files you're scanning
+- Check for typos in the `pattern`
+
+### Too many false positives
+
+**Solutions:**
+- Add an `exclude_pattern` to skip known safe cases
+- Make the pattern more specific (e.g., require word boundaries: `\b`)
+- Adjust the `target` to scan fewer file types
+- Review actual matches to identify common false positive patterns
+
+### Regex not matching
+
+**Symptom:** Pattern looks correct but doesn't match expected code.
+
+**Common issues:**
+- Forgetting to escape special characters: `\.`, `\(`, `\)`
+- Using PCRE features not supported in Go's RE2 (e.g., lookbehinds, backreferences)
+- Not accounting for whitespace: use `\s*` or `\s+`
+
+**Solution:** Test regex at https://regex101.com (select "Golang" flavor).

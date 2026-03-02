@@ -1,0 +1,236 @@
+---
+title: Configuration scanner
+description: Detects security issues in Laravel config/*.php files
+---
+
+The configuration scanner examines Laravel's `config/*.php` files for hardcoded secrets, insecure defaults, and missing security flags that could compromise your application.
+
+## What it checks
+
+The config-scanner performs 13 security checks across 8 configuration files:
+
+### All checks
+
+| Check ID | File | Issue | Severity |
+|----------|------|-------|----------|
+| CFG-001 | app.php | Debug mode hardcoded to true | High |
+| CFG-002 | app.php | Non-standard encryption cipher | Medium |
+| CFG-003 | auth.php | Password reset token expiry too long | Low |
+| CFG-004 | session.php | Session cookie missing HttpOnly flag | High |
+| CFG-005 | session.php | Session cookie missing Secure flag | Medium |
+| CFG-006 | session.php | Session cookie SameSite set to none | Medium |
+| CFG-007 | session.php | Session lifetime excessively long | Low |
+| CFG-008 | mail.php | Mail password hardcoded in config | High |
+| CFG-009 | cors.php | CORS allows all origins | Medium |
+| CFG-010 | cors.php | CORS allows credentials with wildcard origin | High |
+| CFG-011 | database.php | Database password hardcoded in config | High |
+| CFG-012 | broadcasting.php | Broadcasting secret/key hardcoded | Medium |
+| CFG-013 | logging.php | Slack webhook URL hardcoded | Medium |
+
+## Implementation details
+
+Extracted from `internal/scanner/configscan/scanner.go`:
+
+### Config files scanned
+
+```go
+// scanner.go:31-43
+checks := []struct {
+    file  string
+    check func(string) []models.Finding
+}{
+    {"app.php", s.checkApp},
+    {"auth.php", s.checkAuth},
+    {"session.php", s.checkSession},
+    {"mail.php", s.checkMail},
+    {"cors.php", s.checkCORS},
+    {"database.php", s.checkDatabase},
+    {"broadcasting.php", s.checkBroadcasting},
+    {"logging.php", s.checkLogging},
+}
+```
+
+### Pattern matching
+
+The scanner uses regex to find problematic configurations:
+
+```go
+// scanner.go:66-79 - Debug mode check
+if line, n := findPattern(lines, `'debug'\s*=>\s*true`); n > 0 {
+    findings = append(findings, models.Finding{
+        ID:          "CFG-001",
+        Title:       "Debug mode hardcoded to true in app.php",
+        Description: "config/app.php has 'debug' => true instead of reading from env().",
+        Severity:    models.SeverityHigh,
+        File:        "config/app.php",
+        Line:        n,
+        CodeSnippet: line,
+        Remediation: "Use: 'debug' => env('APP_DEBUG', false),",
+    })
+}
+```
+
+### Hardcoded credential detection
+
+For mail, database, and broadcasting configs, Ward detects hardcoded credentials:
+
+```go
+// scanner.go:205-221 - Mail password check
+if line, n := findPattern(lines, `'password'\s*=>\s*'[^']{4,}'`); n > 0 {
+    // Make sure it's not env()
+    if !strings.Contains(line, "env(") {
+        findings = append(findings, models.Finding{
+            ID:          "CFG-008",
+            Title:       "Mail password hardcoded in config",
+            Description: "A mail password is hardcoded in config/mail.php instead of using env().",
+            Severity:    models.SeverityHigh,
+            Category:    "Secrets",
+            CodeSnippet: strings.Replace(line, line, maskConfigValue(line), 1),
+            Remediation: "Use: 'password' => env('MAIL_PASSWORD'),",
+        })
+    }
+}
+```
+
+## Critical checks
+
+### Session security (CFG-004, CFG-005, CFG-006)
+
+Session cookies without proper flags are vulnerable to theft:
+
+<Accordion title="HttpOnly flag (CFG-004)">
+Without `HttpOnly`, JavaScript can access the session cookie via `document.cookie`, enabling theft through XSS attacks.
+
+```php config/session.php
+// Bad
+'http_only' => false,
+
+// Good
+'http_only' => true,
+```
+</Accordion>
+
+<Accordion title="Secure flag (CFG-005)">
+Without `Secure`, the cookie is sent over plain HTTP, allowing session hijacking via network sniffing.
+
+```php config/session.php
+// Bad
+'secure' => false,
+
+// Good
+'secure' => env('SESSION_SECURE_COOKIE', true),
+```
+</Accordion>
+
+<Accordion title="SameSite attribute (CFG-006)">
+Setting SameSite to 'none' allows the cookie to be sent with cross-site requests, weakening CSRF protection.
+
+```php config/session.php
+// Bad
+'same_site' => 'none',
+
+// Good
+'same_site' => 'lax',  // or 'strict' for maximum protection
+```
+</Accordion>
+
+### CORS misconfiguration (CFG-009, CFG-010)
+
+Allowing all origins is dangerous, especially with credentials:
+
+```php config/cors.php
+// Bad - allows any website to make requests
+'allowed_origins' => ['*'],
+'supports_credentials' => true,  // CRITICAL: This combination is very dangerous
+
+// Good - specify exact origins
+'allowed_origins' => [env('FRONTEND_URL')],
+'supports_credentials' => true,
+```
+
+**Why it's dangerous:** Any malicious website can make authenticated requests to your API and steal user data.
+
+## Example findings
+
+<CodeGroup>
+```json Finding Detail
+{
+  "id": "CFG-004",
+  "title": "Session cookie missing HttpOnly flag",
+  "severity": "high",
+  "category": "Configuration",
+  "file": "config/session.php",
+  "line": 145,
+  "code_snippet": "'http_only' => false,",
+  "remediation": "Set: 'http_only' => true,",
+  "references": ["https://cwe.mitre.org/data/definitions/1004.html"]
+}
+```
+
+```json Hardcoded Secret
+{
+  "id": "CFG-011",
+  "title": "Database password hardcoded in config",
+  "severity": "high",
+  "category": "Secrets",
+  "file": "config/database.php",
+  "line": 58,
+  "code_snippet": "'password' => 'my****rd',",
+  "remediation": "Use: 'password' => env('DB_PASSWORD', ''),"
+}
+```
+</CodeGroup>
+
+## Remediation guide
+
+### Move credentials to .env
+
+```php config/database.php
+// Before
+'password' => 'my_secret_password',
+
+// After
+'password' => env('DB_PASSWORD', ''),
+```
+
+```bash .env
+DB_PASSWORD=my_secret_password
+```
+
+### Fix session security
+
+```php config/session.php
+return [
+    'http_only' => true,
+    'secure' => env('SESSION_SECURE_COOKIE', true),
+    'same_site' => 'lax',
+    'lifetime' => 120,  // 2 hours
+];
+```
+
+### Fix CORS configuration
+
+```php config/cors.php
+return [
+    'allowed_origins' => explode(',', env('CORS_ALLOWED_ORIGINS', 'https://example.com')),
+    'allowed_methods' => ['GET', 'POST', 'PUT', 'DELETE'],
+    'supports_credentials' => true,
+];
+```
+
+## Disabling checks
+
+To disable specific config checks:
+
+```yaml ~/.ward/config.yaml
+rules:
+  disable:
+    - CFG-007  # Allow long session lifetime
+    - CFG-003  # Allow long password reset expiry
+```
+
+## Related documentation
+
+- [Environment scanner](/scanners/env-scanner) - Checks .env files
+- [Rules scanner](/scanners/rules-scanner) - Custom YAML rules for configs
+- [Rule overrides](/configuration/rule-overrides) - Adjust severity levels

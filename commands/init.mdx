@@ -1,0 +1,70 @@
+---
+title: ward init
+description: Initialize the Ward configuration directory
+---
+
+The `ward init` command creates the necessary configuration directory and files for Ward in your home directory.
+
+## Usage
+
+```bash
+ward init [flags]
+```
+
+## What It Creates
+
+Running `ward init` creates the `~/.ward` directory with the following structure:
+
+- **config.yaml** - Main configuration file for customizing scan behavior
+- **rules/** - Directory for custom security rules (YAML format)
+- **reports/** - Directory where scan reports are saved
+- **store/** - Internal storage for scan results
+
+## Options
+
+<ParamField path="--force" type="boolean" default="false">
+  Overwrite existing config files if they already exist
+</ParamField>
+
+## Examples
+
+### Basic Initialization
+
+Initialize Ward for the first time:
+
+```bash
+ward init
+```
+
+Example output:
+
+```
+  Initialized Ward configuration.
+
+  Created:
+    ~/.ward/config.yaml       main config
+    ~/.ward/rules/            custom rules
+    ~/.ward/reports/          scan reports
+    ~/.ward/store/            result store
+
+  Edit config.yaml to customize scan behaviour.
+  Drop .yaml rule files into rules/ to add custom rules.
+```
+
+### Force Overwrite
+
+Reinitialize and overwrite existing configuration:
+
+```bash
+ward init --force
+```
+
+This will replace your existing `config.yaml` and recreate the directory structure, useful for resetting to defaults.
+
+## Next Steps
+
+After initialization:
+
+1. Edit `~/.ward/config.yaml` to customize scan settings
+2. Add custom security rules by placing YAML files in `~/.ward/rules/`
+3. Run your first scan with `ward scan <path>`

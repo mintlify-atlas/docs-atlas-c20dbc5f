@@ -1,0 +1,410 @@
+---
+title: CI/CD Integration
+description: Integrate Ward into your continuous integration pipeline to automatically scan for security issues on every commit
+---
+
+Ward is designed to integrate seamlessly into CI/CD pipelines. Run security scans automatically on every push or pull request, fail builds when security issues are detected, and upload results to GitHub Code Scanning.
+
+## Exit Codes and Fail Thresholds
+
+Ward returns exit code `1` when security findings exceed your specified severity threshold, allowing you to gate deployments based on security posture.
+
+### Using `--fail-on`
+
+The `--fail-on` flag sets the minimum severity level that will cause Ward to exit with code 1:
+
+```bash
+# Exit code 1 if any High or Critical findings exist
+ward scan . --output json --fail-on high
+
+# Fail on any finding (including Info)
+ward scan . --output json --fail-on info
+
+# Fail only on Critical findings
+ward scan . --output json --fail-on critical
+```
+
+<Note>
+The severity threshold is **inclusive**. `--fail-on medium` will fail on Medium, High, and Critical findings.
+</Note>
+
+### Severity Levels
+
+Ward recognizes five severity levels (in ascending order):
+
+- **Info** — Informational findings (e.g., missing `.env` file)
+- **Low** — Low-risk issues (e.g., empty database password)
+- **Medium** — Medium-risk issues (e.g., non-production APP_ENV)
+- **High** — High-risk issues (e.g., `APP_DEBUG=true`, hardcoded passwords)
+- **Critical** — Critical security vulnerabilities (e.g., empty APP_KEY, eval() usage)
+
+## Baseline Management for CI
+
+Baselines let you suppress known findings and only fail builds on **new** security issues. This is essential when introducing Ward into an existing project with legacy findings.
+
+<Steps>
+
+<Step title="Generate initial baseline">
+On first run, create a baseline file containing current findings:
+
+```bash
+ward scan . --output json --update-baseline .ward-baseline.json
+```
+
+This creates `.ward-baseline.json` with fingerprints of all current findings.
+</Step>
+
+<Step title="Commit baseline to repository">
+Commit the baseline file to your repository:
+
+```bash
+git add .ward-baseline.json
+git commit -m "Add Ward security baseline"
+```
+</Step>
+
+<Step title="Use baseline in CI">
+Configure your CI pipeline to use the baseline:
+
+```bash
+ward scan . --output json --baseline .ward-baseline.json --fail-on high
+```
+
+Only findings **not** in the baseline will be reported. The build fails only if new High or Critical findings are discovered.
+</Step>
+
+<Step title="Update baseline when needed">
+After fixing findings or acknowledging new ones:
+
+```bash
+ward scan . --output json --update-baseline .ward-baseline.json
+git add .ward-baseline.json
+git commit -m "Update Ward baseline"
+```
+</Step>
+
+</Steps>
+
+## GitHub Actions
+
+Add Ward to your GitHub Actions workflow to scan on every push and pull request.
+
+### Basic Workflow
+
+Create `.github/workflows/ward.yml`:
+
+```yaml
+name: Ward Security Scan
+on: [push, pull_request]
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ward
+        run: go install github.com/eljakani/ward@latest
+
+      - name: Run Ward
+        run: ward init && ward scan . --output json
+```
+
+### With SARIF Upload (GitHub Code Scanning)
+
+Upload Ward's SARIF report to GitHub Code Scanning to see security findings directly in your pull requests:
+
+```yaml
+name: Ward Security Scan
+on: [push, pull_request]
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write  # Required for SARIF upload
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ward
+        run: go install github.com/eljakani/ward@latest
+
+      - name: Run Ward
+        run: ward init && ward scan . --output json,sarif
+
+      - name: Upload SARIF to GitHub Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ward-report.sarif
+```
+
+<Note>
+The `if: always()` ensures SARIF upload happens even if Ward exits with code 1 due to findings.
+</Note>
+
+### With Baseline and Fail Threshold
+
+Gate deployments based on new security findings:
+
+```yaml
+name: Ward Security Scan
+on: [push, pull_request]
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ward
+        run: go install github.com/eljakani/ward@latest
+
+      - name: Initialize Ward
+        run: ward init
+
+      - name: Run Ward with baseline
+        run: |
+          ward scan . --output json,sarif \
+            --baseline .ward-baseline.json \
+            --fail-on high
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ward-report.sarif
+```
+
+This workflow:
+1. Installs Ward from the latest release
+2. Initializes Ward configuration
+3. Runs a scan using the committed baseline
+4. Fails the build if any new High or Critical findings are detected
+5. Uploads SARIF results to GitHub Code Scanning regardless of pass/fail
+
+### Caching Ward Installation
+
+Speed up your workflow by caching the Go installation:
+
+```yaml
+- name: Set up Go
+  uses: actions/setup-go@v4
+  with:
+    go-version: '1.24'
+    cache: true
+
+- name: Install Ward
+  run: go install github.com/eljakani/ward@latest
+```
+
+## GitLab CI
+
+Add Ward to your `.gitlab-ci.yml`:
+
+### Basic GitLab Pipeline
+
+```yaml
+ward-scan:
+  image: golang:latest
+  script:
+    - go install github.com/eljakani/ward@latest
+    - ward init && ward scan . --output json
+  artifacts:
+    paths:
+      - ward-report.*
+    when: always
+```
+
+### With Baseline and Fail Threshold
+
+```yaml
+ward-scan:
+  image: golang:latest
+  script:
+    - go install github.com/eljakani/ward@latest
+    - ward init
+    - ward scan . --output json,sarif --baseline .ward-baseline.json --fail-on high
+  artifacts:
+    paths:
+      - ward-report.*
+    when: always
+  allow_failure: false
+```
+
+Set `allow_failure: false` to ensure the pipeline fails when Ward detects new High or Critical findings.
+
+## Bitbucket Pipelines
+
+Add to your `bitbucket-pipelines.yml`:
+
+```yaml
+pipelines:
+  default:
+    - step:
+        name: Ward Security Scan
+        image: golang:latest
+        script:
+          - go install github.com/eljakani/ward@latest
+          - ward init && ward scan . --output json,sarif --fail-on high
+        artifacts:
+          - ward-report.*
+```
+
+## Azure DevOps
+
+Create `azure-pipelines.yml`:
+
+```yaml
+trigger:
+  - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+  - task: GoTool@0
+    inputs:
+      version: '1.24'
+
+  - script: |
+      go install github.com/eljakani/ward@latest
+      ward init
+      ward scan . --output json,sarif --fail-on high
+    displayName: 'Run Ward Security Scan'
+
+  - task: PublishBuildArtifacts@1
+    condition: always()
+    inputs:
+      pathToPublish: 'ward-report.json'
+      artifactName: 'ward-reports'
+```
+
+## CircleCI
+
+Add to `.circleci/config.yml`:
+
+```yaml
+version: 2.1
+
+jobs:
+  security-scan:
+    docker:
+      - image: cimg/go:1.24
+    steps:
+      - checkout
+      - run:
+          name: Install Ward
+          command: go install github.com/eljakani/ward@latest
+      - run:
+          name: Run Ward
+          command: |
+            ward init
+            ward scan . --output json,sarif --baseline .ward-baseline.json --fail-on high
+      - store_artifacts:
+          path: ward-report.json
+          destination: ward-report.json
+
+workflows:
+  security:
+    jobs:
+      - security-scan
+```
+
+## Docker
+
+Run Ward in a Docker container for consistent CI environments:
+
+```dockerfile
+FROM golang:1.24 AS ward
+
+RUN go install github.com/eljakani/ward@latest
+
+WORKDIR /workspace
+COPY . .
+
+RUN ward init && ward scan . --output json --fail-on high
+```
+
+Or use as a CI step:
+
+```yaml
+- name: Run Ward in Docker
+  run: |
+    docker run --rm -v $(pwd):/workspace golang:1.24 sh -c \
+      "cd /workspace && go install github.com/eljakani/ward@latest && ward init && ward scan . --output json"
+```
+
+## Report Formats
+
+Ward can generate multiple report formats simultaneously. Configure output formats in the `--output` flag:
+
+```bash
+# Generate JSON and SARIF
+ward scan . --output json,sarif
+
+# Generate all formats
+ward scan . --output json,sarif,html,markdown
+```
+
+Available formats:
+- **json** — Machine-readable format (always generated as baseline)
+- **sarif** — SARIF 2.1.0 format for GitHub Code Scanning, IDEs, and security tools
+- **html** — Standalone visual report with dark theme
+- **markdown** — Text-based report, great for pull request comments
+
+## Troubleshooting
+
+### Ward exits with code 0 despite findings
+
+Ensure you're using the `--fail-on` flag:
+
+```bash
+ward scan . --output json --fail-on high
+```
+
+Without `--fail-on`, Ward always exits with code 0 regardless of findings.
+
+### SARIF upload fails in GitHub Actions
+
+Ensure your workflow has the required permissions:
+
+```yaml
+permissions:
+  security-events: write  # Required for SARIF upload
+  contents: read
+```
+
+### Baseline file not found
+
+Ensure `.ward-baseline.json` is committed to your repository:
+
+```bash
+git add .ward-baseline.json
+git commit -m "Add Ward baseline"
+git push
+```
+
+### Go installation is slow
+
+Use Go version caching in GitHub Actions:
+
+```yaml
+- uses: actions/setup-go@v4
+  with:
+    go-version: '1.24'
+    cache: true
+```
+
+Or cache the Ward binary directly:
+
+```yaml
+- uses: actions/cache@v3
+  with:
+    path: ~/go/bin/ward
+    key: ward-${{ hashFiles('go.sum') }}
+```

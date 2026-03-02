@@ -1,0 +1,239 @@
+---
+title: 'Exit Codes'
+description: 'Understanding Ward exit codes for CI/CD integration'
+---
+
+## Overview
+
+Ward uses standard Unix exit codes to indicate scan results. This is essential for CI/CD pipeline integration where the exit code determines whether a build passes or fails.
+
+## Exit Code Reference
+
+<ResponseField name="0" type="Success">
+  The scan completed successfully with no errors.
+  
+  **This exit code is returned when:**
+  - No `--fail-on` threshold is specified (regardless of findings)
+  - A threshold is specified but no findings meet or exceed it
+  - The scan found no security issues at all
+  
+  ```bash
+  $ ward scan . --output json
+  # Scan completes, 5 Low findings discovered
+  $ echo $?
+  0
+  ```
+</ResponseField>
+
+<ResponseField name="1" type="Failure">
+  The scan failed or findings exceeded the severity threshold.
+  
+  **This exit code is returned when:**
+  - Findings at or above the `--fail-on` threshold were discovered
+  - The scan encountered an error (missing config, invalid path, etc.)
+  
+  ```bash
+  $ ward scan . --output json --fail-on high
+  # Scan finds 2 Critical and 3 High findings
+  findings exceed --fail-on high threshold: 2 critical, 3 high
+  $ echo $?
+  1
+  ```
+</ResponseField>
+
+## Fail-On Threshold Behavior
+
+The `--fail-on` flag sets a **severity threshold** that triggers exit code 1 when met or exceeded.
+
+### Severity Hierarchy
+
+Severities are ordered from lowest to highest:
+
+1. **Info** (lowest)
+2. **Low**
+3. **Medium**
+4. **High**
+5. **Critical** (highest)
+
+### Threshold Is Inclusive
+
+When you set a threshold, Ward exits with code 1 if **any finding at that severity level or higher** is discovered.
+
+<CodeGroup>
+```bash info (all findings)
+ward scan . --fail-on info
+# Exits 1 if ANY findings exist (Info, Low, Medium, High, or Critical)
+```
+
+```bash low
+ward scan . --fail-on low
+# Exits 1 if Low, Medium, High, or Critical findings exist
+# Ignores Info findings
+```
+
+```bash medium
+ward scan . --fail-on medium
+# Exits 1 if Medium, High, or Critical findings exist
+# Ignores Info and Low findings
+```
+
+```bash high
+ward scan . --fail-on high
+# Exits 1 if High or Critical findings exist
+# Ignores Info, Low, and Medium findings
+```
+
+```bash critical (only critical)
+ward scan . --fail-on critical
+# Exits 1 ONLY if Critical findings exist
+# Ignores all other severities
+```
+</CodeGroup>
+
+## Implementation Details
+
+Ward's exit code logic is implemented in the `checkFailOn` function:
+
+**Source:** `cmd/scan.go:177`
+
+```go
+func checkFailOn(report *models.ScanReport) error {
+    if failOn == "" || report == nil {
+        return nil
+    }
+
+    threshold := models.ParseSeverity(failOn)
+
+    for _, f := range report.Findings {
+        if f.Severity >= threshold {
+            counts := report.CountBySeverity()
+            var parts []string
+            for _, sev := range []models.Severity{
+                models.SeverityCritical, 
+                models.SeverityHigh, 
+                models.SeverityMedium, 
+                models.SeverityLow, 
+                models.SeverityInfo,
+            } {
+                if sev >= threshold {
+                    if c := counts[sev]; c > 0 {
+                        parts = append(parts, 
+                            fmt.Sprintf("%d %s", c, sev))
+                    }
+                }
+            }
+            return fmt.Errorf(
+                "findings exceed --fail-on %s threshold: %s", 
+                failOn, 
+                strings.Join(parts, ", "))
+        }
+    }
+
+    return nil
+}
+```
+
+## CI/CD Examples
+
+### GitHub Actions
+
+```yaml
+- name: Run Ward Security Scan
+  run: |
+    ward scan . \
+      --output json,sarif \
+      --fail-on high
+  # Job fails if High or Critical findings exist
+
+- name: Upload SARIF (runs even if previous step fails)
+  if: always()
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: ward-report.sarif
+```
+
+### GitLab CI
+
+```yaml
+ward-scan:
+  script:
+    - ward scan . --output json --fail-on high
+  # Pipeline fails if exit code is 1
+  artifacts:
+    paths:
+      - ward-report.json
+    when: always  # Save report even on failure
+```
+
+### Conditional Failure
+
+You can use shell logic to customize exit behavior:
+
+```bash
+# Allow the scan to fail but continue the pipeline
+ward scan . --output json --fail-on high || true
+
+# Only fail on Critical findings, warn on High
+ward scan . --output json --fail-on critical
+if [ $? -eq 1 ]; then
+  echo "CRITICAL findings detected - failing build"
+  exit 1
+fi
+
+ward scan . --output json --fail-on high
+if [ $? -eq 1 ]; then
+  echo "WARNING: High findings detected but not blocking"
+fi
+```
+
+## Error Messages
+
+### Findings Exceed Threshold
+
+```
+findings exceed --fail-on high threshold: 2 critical, 3 high
+```
+
+This message shows:
+- The threshold that was set (`high`)
+- Count of findings at each severity level that met or exceeded the threshold
+
+### Configuration Errors
+
+If Ward encounters configuration issues, it exits with code 1 and displays an error:
+
+```
+Error: loading config: failed to read ~/.ward/config.yaml: no such file or directory
+```
+
+<Tip>
+Run `ward init` to create the default configuration if you see config-related errors.
+</Tip>
+
+### Baseline Errors
+
+```
+Error: loading baseline: failed to read baseline.json: no such file or directory
+```
+
+Baseline file must exist when specified with `--baseline`.
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Start Permissive" icon="shield-check">
+    Begin with `--fail-on high` in CI to avoid blocking on minor issues while you remediate existing findings.
+  </Card>
+  
+  <Card title="Use Baselines" icon="list-check">
+    Generate a baseline to suppress known findings, then use `--fail-on` to prevent new issues.
+  </Card>
+  
+  <Card title="Gradual Strictness" icon="arrow-trend-up">
+    Over time, lower the threshold from `high` → `medium` → `low` as you improve security posture.
+  </Card>
+  
+  <Card title="Always Save Reports" icon="floppy-disk">
+    Use `if: always()` or `when: always` to save reports even when scans fail, for debugging.
+  </Card>
+</CardGroup>

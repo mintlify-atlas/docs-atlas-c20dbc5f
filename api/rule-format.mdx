@@ -1,0 +1,383 @@
+---
+title: 'Rule YAML Format'
+description: 'Complete schema reference for writing custom Ward security rules'
+---
+
+## Overview
+
+Ward rules are defined in YAML files located in `~/.ward/rules/`. Each rule file can contain multiple rules that define pattern-based security checks.
+
+Rules are automatically loaded from:
+- `~/.ward/rules/*.yaml` (default rules)
+- `~/.ward/rules/*.yml`
+- Custom directories specified in `config.yaml` under `rules.custom_dirs`
+
+## Rule File Structure
+
+Each YAML file must have a top-level `rules` array:
+
+```yaml
+rules:
+  - id: RULE-001
+    title: "First Rule"
+    # ... rule definition
+  
+  - id: RULE-002
+    title: "Second Rule"
+    # ... rule definition
+```
+
+## Rule Schema
+
+<ParamField path="id" type="string" required>
+  Unique identifier for the rule. Used for disabling rules and tracking findings.
+  
+  **Naming convention:** `CATEGORY-NNN` (e.g., `SECRET-001`, `AUTH-003`, `XSS-002`)
+  
+  ```yaml
+  id: SECRET-001
+  ```
+</ParamField>
+
+<ParamField path="title" type="string" required>
+  Short, human-readable title for the finding. Displayed in reports and TUI.
+  
+  Keep it concise (under 80 characters) and actionable.
+  
+  ```yaml
+  title: "Hardcoded API Key in Configuration"
+  ```
+</ParamField>
+
+<ParamField path="description" type="string" required>
+  Detailed explanation of the security issue and why it matters.
+  
+  Should explain:
+  - What the rule detects
+  - Why it's a security concern
+  - Potential impact
+  
+  ```yaml
+  description: |
+    Hardcoded API keys in configuration files can be exposed in version 
+    control or logs, leading to unauthorized access to external services.
+  ```
+</ParamField>
+
+<ParamField path="severity" type="string" required>
+  Severity level of findings from this rule.
+  
+  **Valid values:** `critical`, `high`, `medium`, `low`, `info`
+  
+  Can be overridden per-rule in `config.yaml`.
+  
+  ```yaml
+  severity: high
+  ```
+</ParamField>
+
+<ParamField path="category" type="string" required>
+  Category or class of security issue. Used for grouping findings in reports.
+  
+  **Common categories:**
+  - `Secrets Management`
+  - `Injection`
+  - `XSS`
+  - `Authentication`
+  - `Authorization`
+  - `Cryptography`
+  - `Configuration`
+  - `Debug & Logging`
+  - `File Upload`
+  - `Session Management`
+  
+  ```yaml
+  category: Secrets Management
+  ```
+</ParamField>
+
+<ParamField path="enabled" type="boolean" required>
+  Whether this rule is active.
+  
+  Set to `false` to disable the rule without deleting it. Can also be disabled globally in `config.yaml`.
+  
+  ```yaml
+  enabled: true
+  ```
+</ParamField>
+
+<ParamField path="patterns" type="array[PatternDef]" required>
+  List of pattern checks that trigger this rule. At least one pattern must match for a finding to be created.
+  
+  See [Pattern Definition](#pattern-definition) below.
+  
+  ```yaml
+  patterns:
+    - type: regex
+      target: php-files
+      pattern: 'password\s*=\s*["\'].+["\']'
+  ```
+</ParamField>
+
+<ParamField path="tags" type="array[string]">
+  Optional tags for categorization and filtering.
+  
+  ```yaml
+  tags:
+    - owasp-a02
+    - cwe-798
+    - pci-dss
+  ```
+</ParamField>
+
+<ParamField path="remediation" type="string">
+  Instructions for fixing the issue. Displayed in the TUI detail panel and reports.
+  
+  Should include:
+  - Specific steps to remediate
+  - Code examples (before/after)
+  - Links to documentation
+  
+  ```yaml
+  remediation: |
+    Store API keys in environment variables:
+    
+    // config/services.php
+    'api_key' => env('EXTERNAL_API_KEY'),
+    
+    Then set EXTERNAL_API_KEY in your .env file.
+  ```
+</ParamField>
+
+<ParamField path="references" type="array[string]">
+  URLs to external documentation, advisories, or guides.
+  
+  ```yaml
+  references:
+    - https://laravel.com/docs/configuration#environment-configuration
+    - https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/
+  ```
+</ParamField>
+
+## Pattern Definition
+
+Each pattern defines a specific check to perform on files.
+
+**Source:** `internal/config/rules.go:26`
+
+<ParamField path="type" type="string" required>
+  Type of pattern matching to perform.
+  
+  **Valid values:**
+  - `regex` - Regular expression match (line-by-line)
+  - `contains` - Exact substring match
+  - `file-exists` - Check if a file matching the glob exists
+  
+  See [Pattern Types](/api/pattern-types) for detailed information.
+  
+  ```yaml
+  type: regex
+  ```
+</ParamField>
+
+<ParamField path="target" type="string" required>
+  Which files to scan. Can be a predefined target alias or a custom glob pattern.
+  
+  **Predefined targets:**
+  - `php-files` - All `.php` files (recursive, skips `vendor/`)
+  - `blade-files` - `resources/views/**/*.blade.php`
+  - `config-files` - `config/*.php`
+  - `env-files` - `.env`, `.env.*`
+  - `routes-files` - `routes/*.php`
+  - `migration-files` - `database/migrations/*.php`
+  - `js-files` - `resources/js/**/*.{js,ts,jsx,tsx}`
+  
+  **Custom globs:**
+  - `app/Models/*.php`
+  - `**/*.blade.php`
+  - `.env.example`
+  
+  See [Target Types](/api/target-types) for complete reference.
+  
+  ```yaml
+  target: php-files
+  ```
+</ParamField>
+
+<ParamField path="pattern" type="string" required>
+  The pattern to search for. Format depends on the `type`:
+  
+  - **regex:** Regular expression (Go syntax)
+  - **contains:** Exact string
+  - **file-exists:** Not used (target is the glob)
+  
+  ```yaml
+  # Regex
+  pattern: 'DB::raw\([^)]*\$'
+  
+  # Contains
+  pattern: 'eval('
+  ```
+</ParamField>
+
+<ParamField path="negative" type="boolean" default="false">
+  If `true`, triggers when the pattern is **absent** rather than present.
+  
+  Useful for "must have" checks like required security headers or CSRF tokens.
+  
+  ```yaml
+  # Fire if @csrf is NOT found in Blade files
+  patterns:
+    - type: contains
+      target: blade-files
+      pattern: "@csrf"
+      negative: true
+  ```
+</ParamField>
+
+<ParamField path="exclude_pattern" type="string">
+  If specified, lines matching this pattern are excluded even if they match the main pattern.
+  
+  Reduces false positives by filtering out known safe cases.
+  
+  ```yaml
+  patterns:
+    - type: regex
+      target: php-files
+      pattern: 'password'
+      exclude_pattern: '// This is safe|Test password'
+  ```
+</ParamField>
+
+## Complete Example
+
+Here's a full rule file with multiple rules:
+
+```yaml
+rules:
+  - id: SECRET-001
+    title: "Hardcoded AWS Access Key"
+    description: |
+      AWS access keys should never be hardcoded in source code. 
+      If committed to version control, these credentials can be 
+      extracted and used to gain unauthorized access to your AWS resources.
+    severity: critical
+    category: Secrets Management
+    enabled: true
+    tags:
+      - aws
+      - credentials
+      - owasp-a07
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: 'AKIA[0-9A-Z]{16}'
+    remediation: |
+      Use environment variables to store AWS credentials:
+      
+      // config/services.php
+      'aws' => [
+          'key' => env('AWS_ACCESS_KEY_ID'),
+          'secret' => env('AWS_SECRET_ACCESS_KEY'),
+      ],
+      
+      Then set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in .env
+    references:
+      - https://docs.aws.amazon.com/general/latest/gr/aws-access-keys-best-practices.html
+
+  - id: INJECTION-001
+    title: "Unsafe DB::raw() with User Input"
+    description: |
+      Using DB::raw() with string interpolation or concatenation can lead 
+      to SQL injection if user input is not properly sanitized.
+    severity: critical
+    category: Injection
+    enabled: true
+    patterns:
+      - type: regex
+        target: php-files
+        pattern: 'DB::raw\([^)]*\$'
+        exclude_pattern: '// SQL injection safe'
+    remediation: |
+      Use parameter binding instead:
+      
+      // Bad
+      DB::raw("SELECT * FROM users WHERE id = $id")
+      
+      // Good
+      DB::table('users')->where('id', $id)->get()
+      DB::select('SELECT * FROM users WHERE id = ?', [$id])
+    references:
+      - https://laravel.com/docs/database#running-queries
+      - https://owasp.org/www-community/attacks/SQL_Injection
+
+  - id: AUTH-001
+    title: "Missing Authentication Middleware"
+    description: |
+      Route groups or individual routes that handle sensitive operations 
+      should require authentication middleware.
+    severity: high
+    category: Authorization
+    enabled: true
+    patterns:
+      - type: contains
+        target: routes-files
+        pattern: "Route::post"
+      - type: contains
+        target: routes-files
+        pattern: "middleware('auth')"
+        negative: true
+    remediation: |
+      Apply authentication middleware to protected routes:
+      
+      Route::middleware(['auth'])->group(function () {
+          Route::post('/sensitive-action', [Controller::class, 'action']);
+      });
+```
+
+## Rule Location
+
+Rules are loaded from:
+
+1. **Default rules:** `~/.ward/rules/*.yaml` (created by `ward init`)
+2. **Custom directories:** Specified in `config.yaml`:
+
+```yaml
+rules:
+  custom_dirs:
+    - /path/to/team-rules
+    - /path/to/project-specific-rules
+```
+
+## Rule Overrides
+
+You can disable or modify rules without editing the YAML files by using `config.yaml`:
+
+```yaml
+rules:
+  # Disable specific rules
+  disable:
+    - DEBUG-001
+    - DEBUG-002
+  
+  # Override severity or disable
+  override:
+    CRYPTO-003:
+      severity: low
+    AUTH-001:
+      enabled: false
+```
+
+## Built-in Rules
+
+Ward ships with 40 default rules across 7 categories:
+
+- **secrets.yaml** - 7 rules for hardcoded credentials
+- **injection.yaml** - 6 rules for SQL/command/code injection
+- **xss.yaml** - 4 rules for cross-site scripting
+- **debug.yaml** - 6 rules for debug artifacts
+- **crypto.yaml** - 5 rules for weak cryptography
+- **security-config.yaml** - 7 rules for configuration issues
+- **auth.yaml** - 5 rules for authentication/authorization
+
+See `~/.ward/rules/` after running `ward init`.
