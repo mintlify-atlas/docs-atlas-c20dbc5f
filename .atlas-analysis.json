@@ -1,0 +1,122 @@
+{
+  "projectType": "cli-tool",
+  "projectName": "Ward",
+  "projectDescription": "Security scanner built for Laravel that detects misconfigurations, vulnerabilities, and exposed secrets with a beautiful TUI.",
+  "theme": "aspen",
+  "primaryColor": "#9C27B0",
+  "lightColor": "#BA68C8",
+  "darkColor": "#7B1FA2",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/scan-pipeline",
+              "concepts/security-scanners"
+            ]
+          },
+          {
+            "group": "Command Reference",
+            "pages": [
+              "commands/init",
+              "commands/scan",
+              "commands/version"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/config-file",
+              "configuration/custom-rules",
+              "configuration/output-formats",
+              "configuration/rule-overrides"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/ci-integration",
+              "guides/baseline-management",
+              "guides/writing-custom-rules",
+              "guides/understanding-findings"
+            ]
+          },
+          {
+            "group": "Scanners",
+            "pages": [
+              "scanners/env-scanner",
+              "scanners/config-scanner",
+              "scanners/dependency-scanner",
+              "scanners/rules-scanner"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "CLI Commands",
+            "pages": [
+              "api/cli-options",
+              "api/exit-codes"
+            ]
+          },
+          {
+            "group": "Rule Schema",
+            "pages": [
+              "api/rule-format",
+              "api/pattern-types",
+              "api/target-types"
+            ]
+          },
+          {
+            "group": "Report Formats",
+            "pages": [
+              "api/json-format",
+              "api/sarif-format"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Laravel-aware security scanning with project structure resolution",
+    "Interactive terminal UI with real-time scan progress",
+    "Four specialized scanners: env, config, dependency (live CVE lookup), and rules engine",
+    "40 built-in YAML security rules covering secrets, injection, XSS, debug, crypto, and auth",
+    "Custom rule support with regex, contains, and file-exists patterns",
+    "Multiple output formats: JSON, SARIF, HTML, Markdown",
+    "CI/CD integration with baseline support and fail-on thresholds",
+    "Scan history with diff tracking between runs"
+  ],
+  "publicApiSurface": [
+    "ward init - Initialize configuration directory",
+    "ward scan <path> - Scan local Laravel project",
+    "ward scan <git-url> - Clone and scan remote repository",
+    "ward version - Print version information",
+    "--output <formats> - Specify output formats (json,sarif,html,markdown)",
+    "--fail-on <severity> - CI exit code control (info,low,medium,high,critical)",
+    "--baseline <path> - Suppress known findings from baseline file",
+    "--update-baseline <path> - Save current findings as new baseline",
+    "config.yaml - Main configuration file",
+    "rules/*.yaml - Custom security rules",
+    "ENV-001 to ENV-008 - Environment scanner checks",
+    "CONFIG-* - Configuration scanner checks",
+    "Dependency scanner - Live CVE lookup via OSV.dev",
+    "40 built-in rules across 7 categories"
+  ]
+}
